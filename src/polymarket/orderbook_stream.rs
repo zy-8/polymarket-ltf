@@ -1,0 +1,789 @@
+//! Polymarket 订单簿订阅与本地缓存。
+//!
+//! 这个模块只做一件事：
+//! 通过官方 Rust SDK 订阅多个 asset 的订单簿快照，并在内存里持续维护一份
+//! 本地可读的二元市场订单簿。
+//!
+//! 当前设计尽量贴近你现有代码：
+//! - 对外只暴露一个 `Client`
+//! - 内部直接复用 `types::orderbook::OrderBooks`
+//! - 订阅源使用官方 `clob::ws::Client::subscribe_orderbook`
+//!   和 `clob::ws::Client::subscribe_prices`
+//! - 存储按你现有的二元镜像订单簿模型维护
+//!
+//! 一个重要前提：
+//! SDK 的市场 WS 是按单个 `asset_id` 推送订单簿，
+//! 但你本地的 `OrderBooks` 是二元市场模型。
+//! 所以这里采用一个更干净的约定：
+//! - 每个二元市场只订阅一个 anchor asset（这里固定为 `up_asset_id`）
+//! - 本地只维护这一份 canonical book
+//! - `down_asset_id` 永远通过镜像视图读取
+
+use crate::errors::{PolyfillError, Result};
+use crate::polymarket::types::orderbook::{BinaryOrderBook, Level, OrderBooks, Side};
+use futures::{StreamExt, stream::select};
+use polymarket_client_sdk::clob::ws::{BookUpdate, Client as WsClient, PriceChange};
+use polymarket_client_sdk::types::U256;
+use rust_decimal::Decimal;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
+use tokio::time::sleep;
+use tracing::{info, warn};
+
+const RECONNECT_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const RECONNECT_MULTIPLIER: u32 = 2;
+const COMMAND_BUFFER: usize = 64;
+
+/// Polymarket 订单簿订阅客户端。
+///
+/// `connect()` 之后会启动一个后台任务：
+/// - 等待外部通过 `subscribe()` 动态订阅
+/// - 收到新快照后直接替换本地簿
+/// - 如果流异常结束，则按固定退避自动重建订阅
+pub struct Client {
+    books: Arc<RwLock<OrderBooks>>,
+    tx: mpsc::Sender<Command>,
+    task: Mutex<Option<AbortHandle>>,
+}
+
+impl Client {
+    /// 启动后台订阅任务，并以空市场集合开始。
+    pub async fn connect() -> Result<Self> {
+        let books = Arc::new(RwLock::new(OrderBooks::new()));
+        let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
+
+        let task = tokio::spawn(run_subscription_loop(Arc::clone(&books), rx)).abort_handle();
+
+        info!("已启动 Polymarket 订单簿订阅，等待动态订阅市场");
+
+        Ok(Self {
+            books,
+            tx,
+            task: Mutex::new(Some(task)),
+        })
+    }
+
+    /// 当前已注册的二元市场数量。
+    pub fn len(&self) -> usize {
+        self.books
+            .read()
+            .map(|guard| guard.len())
+            .unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 直接读取 best bid。
+    pub fn best_bid(&self, asset_id: &U256) -> Option<Level> {
+        self.books.read().ok()?.best_bid(asset_id)
+    }
+
+    /// 直接读取 best ask。
+    pub fn best_ask(&self, asset_id: &U256) -> Option<Level> {
+        self.books.read().ok()?.best_ask(asset_id)
+    }
+
+    /// 直接读取中间价。
+    pub fn mid(&self, asset_id: &U256) -> Option<Decimal> {
+        self.books.read().ok()?.mid(asset_id)
+    }
+
+    /// 直接读取价差。
+    pub fn spread(&self, asset_id: &U256) -> Option<Decimal> {
+        self.books.read().ok()?.spread(asset_id)
+    }
+
+    /// 读取前 `depth` 档买盘。
+    pub fn bids(&self, asset_id: &U256, depth: usize) -> Option<Vec<Level>> {
+        Some(self.books.read().ok()?.get(asset_id)?.bids(depth))
+    }
+
+    /// 读取前 `depth` 档卖盘。
+    pub fn asks(&self, asset_id: &U256, depth: usize) -> Option<Vec<Level>> {
+        Some(self.books.read().ok()?.get(asset_id)?.asks(depth))
+    }
+
+    pub async fn subscribe(&self, markets: Vec<[U256; 2]>) -> Result<()> {
+        self.tx
+            .send(Command::Subscribe(markets))
+            .await
+            .map_err(|_| PolyfillError::internal_simple("Polymarket 订阅任务已关闭"))
+    }
+
+    pub async fn unsubscribe(&self, asset_ids: Vec<U256>) -> Result<()> {
+        self.tx
+            .send(Command::Unsubscribe(asset_ids))
+            .await
+            .map_err(|_| PolyfillError::internal_simple("Polymarket 订阅任务已关闭"))
+    }
+
+    /// 关闭后台订阅任务。
+    pub fn close(&self) {
+        self.close_inner();
+    }
+
+    fn close_inner(&self) {
+        let mut task = self.task.lock().unwrap_or_else(|poisoned| {
+            warn!("Polymarket 订单簿任务锁已被污染，继续强制关闭");
+            poisoned.into_inner()
+        });
+
+        if let Some(task) = task.take() {
+            let _ = self.tx.try_send(Command::Shutdown);
+            task.abort();
+        }
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.close_inner();
+    }
+}
+
+async fn run_subscription_loop(
+    books: Arc<RwLock<OrderBooks>>,
+    mut commands: mpsc::Receiver<Command>,
+) {
+    let mut desired_asset_ids = HashSet::new();
+    let mut delay = RECONNECT_BASE_DELAY;
+
+    loop {
+        if desired_asset_ids.is_empty() {
+            match commands.recv().await {
+                Some(command) => match apply_command(command, &books, &mut desired_asset_ids) {
+                    Ok(ControlFlow::Continue) => continue,
+                    Ok(ControlFlow::Rebuild) => {
+                        delay = RECONNECT_BASE_DELAY;
+                        continue;
+                    }
+                    Ok(ControlFlow::Shutdown) | Err(_) => break,
+                },
+                None => break,
+            }
+        }
+
+        let current_asset_ids = desired_asset_ids.iter().copied().collect::<Vec<_>>();
+        let client = WsClient::default();
+
+        match (
+            client.subscribe_orderbook(current_asset_ids.clone()),
+            client.subscribe_prices(current_asset_ids.clone()),
+        ) {
+            (Ok(book_stream), Ok(price_stream)) => {
+                info!(
+                    "Polymarket 订单簿与 PriceChange 订阅已建立: asset_ids={}",
+                    current_asset_ids.len()
+                );
+                delay = RECONNECT_BASE_DELAY;
+
+                let book_stream = book_stream.map(|message| message.map(StreamEvent::Book));
+                let price_stream =
+                    price_stream.map(|message| message.map(StreamEvent::PriceChange));
+                let mut stream = Box::pin(select(book_stream, price_stream));
+                let mut should_rebuild = false;
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        command = commands.recv() => {
+                            match command {
+                                Some(command) => {
+                                    match apply_command(command, &books, &mut desired_asset_ids) {
+                                        Ok(ControlFlow::Continue) => {}
+                                        Ok(ControlFlow::Rebuild) => {
+                                            let _ = client.unsubscribe_orderbook(&current_asset_ids);
+                                            let _ = client.unsubscribe_prices(&current_asset_ids);
+                                            should_rebuild = true;
+                                            break;
+                                        }
+                                        Ok(ControlFlow::Shutdown) | Err(_) => {
+                                            let _ = client.unsubscribe_orderbook(&current_asset_ids);
+                                            let _ = client.unsubscribe_prices(&current_asset_ids);
+                                            return;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    let _ = client.unsubscribe_orderbook(&current_asset_ids);
+                                    let _ = client.unsubscribe_prices(&current_asset_ids);
+                                    return;
+                                }
+                            }
+                        }
+                        message = stream.next() => match message {
+                            Some(Ok(StreamEvent::Book(update))) => {
+                                if let Err(error) = handle_book_update(&books, update) {
+                                    warn!("应用 Polymarket BookUpdate 失败: {}", error);
+                                }
+                            }
+                            Some(Ok(StreamEvent::PriceChange(change))) => {
+                                if let Err(error) = handle_price_change(&books, change) {
+                                    warn!("应用 Polymarket PriceChange 失败: {}", error);
+                                }
+                            }
+                            Some(Err(error)) => {
+                                warn!("Polymarket 市场流错误: {}", error);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+
+                if should_rebuild {
+                    continue;
+                }
+
+                warn!("Polymarket 市场流已结束，准备重建订阅");
+            }
+            (Err(error), _) => {
+                warn!("创建 Polymarket 订单簿订阅失败: {}", error);
+            }
+            (_, Err(error)) => {
+                warn!("创建 Polymarket PriceChange 订阅失败: {}", error);
+            }
+        }
+
+        sleep(delay).await;
+        delay = next_reconnect_delay(delay);
+    }
+}
+
+// 把 SDK 的整本快照翻译成 `OrderBooks::replace(...)`。
+fn handle_book_update(books: &Arc<RwLock<OrderBooks>>, update: BookUpdate) -> Result<()> {
+    let bids = update
+        .bids
+        .into_iter()
+        .map(|level| Level::new(level.price, level.size))
+        .collect::<Vec<_>>();
+    let asks = update
+        .asks
+        .into_iter()
+        .map(|level| Level::new(level.price, level.size))
+        .collect::<Vec<_>>();
+
+    let mut books_guard = books
+        .write()
+        .map_err(|_| PolyfillError::internal_simple("Polymarket 订单簿写锁已被污染"))?;
+    books_guard.replace(&update.asset_id, bids, asks)?;
+
+    Ok(())
+}
+
+// 把 SDK 的单档变更翻译成 `OrderBooks::set_level(...)`。
+fn handle_price_change(books: &Arc<RwLock<OrderBooks>>, change: PriceChange) -> Result<()> {
+    let mut books_guard = books
+        .write()
+        .map_err(|_| PolyfillError::internal_simple("Polymarket 订单簿写锁已被污染"))?;
+    let mut raw_updates = Vec::new();
+    let mut normalized = HashMap::new();
+    let mut inconsistent = false;
+
+    for entry in change.price_changes {
+        let size = match entry.size {
+            Some(size) => size,
+            None => continue,
+        };
+        raw_updates.push((entry.asset_id, entry.side, entry.price, size));
+
+        let update =
+            books_guard.normalize_level_update(&entry.asset_id, entry.side, entry.price, size)?;
+        let key = (update.asset_id, side_key(update.side), update.price);
+
+        if let Some(existing_size) = normalized.insert(key, update.size) {
+            if existing_size != update.size {
+                inconsistent = true;
+            }
+        }
+    }
+
+    if inconsistent {
+        warn!("Polymarket PriceChange 同批次双边归一化后不一致，退回逐条应用");
+        for (asset_id, side, price, size) in raw_updates {
+            books_guard.set_level(&asset_id, side, price, size)?;
+        }
+        return Ok(());
+    }
+
+    for ((asset_id, side, price), size) in normalized {
+        books_guard.set_level(&asset_id, side_from_key(side), price, size)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn build_books(markets: Vec<[U256; 2]>) -> Result<(Arc<RwLock<OrderBooks>>, Vec<U256>)> {
+    if markets.is_empty() {
+        return Err(PolyfillError::validation(
+            "Polymarket 订单簿订阅至少需要一个二元市场",
+        ));
+    }
+
+    let mut orderbooks = OrderBooks::new();
+    let mut asset_ids = Vec::with_capacity(markets.len());
+    let mut seen_asset_ids = HashSet::with_capacity(markets.len());
+
+    for [up_asset_id, down_asset_id] in markets {
+        if up_asset_id == down_asset_id {
+            return Err(PolyfillError::validation(
+                "二元市场的两个 asset_id 不能相同",
+            ));
+        }
+
+        orderbooks.insert(BinaryOrderBook::new(up_asset_id, down_asset_id)?)?;
+
+        if seen_asset_ids.insert(up_asset_id) {
+            asset_ids.push(up_asset_id);
+        }
+    }
+
+    Ok((Arc::new(RwLock::new(orderbooks)), asset_ids))
+}
+
+fn next_reconnect_delay(current_delay: std::time::Duration) -> std::time::Duration {
+    let next_millis = current_delay
+        .as_millis()
+        .saturating_mul(RECONNECT_MULTIPLIER as u128)
+        .min(RECONNECT_MAX_DELAY.as_millis());
+
+    std::time::Duration::from_millis(next_millis as u64)
+}
+
+enum StreamEvent {
+    Book(BookUpdate),
+    PriceChange(PriceChange),
+}
+
+enum Command {
+    Subscribe(Vec<[U256; 2]>),
+    Unsubscribe(Vec<U256>),
+    Shutdown,
+}
+
+enum ControlFlow {
+    Continue,
+    Rebuild,
+    Shutdown,
+}
+
+fn apply_command(
+    command: Command,
+    books: &Arc<RwLock<OrderBooks>>,
+    desired_asset_ids: &mut HashSet<U256>,
+) -> Result<ControlFlow> {
+    match command {
+        Command::Subscribe(markets) => {
+            let changed = register_markets(books, desired_asset_ids, markets)?;
+            Ok(if changed {
+                ControlFlow::Rebuild
+            } else {
+                ControlFlow::Continue
+            })
+        }
+        Command::Unsubscribe(asset_ids) => {
+            let changed = remove_markets(books, desired_asset_ids, asset_ids)?;
+            Ok(if changed {
+                ControlFlow::Rebuild
+            } else {
+                ControlFlow::Continue
+            })
+        }
+        Command::Shutdown => Ok(ControlFlow::Shutdown),
+    }
+}
+
+fn register_markets(
+    books: &Arc<RwLock<OrderBooks>>,
+    desired_asset_ids: &mut HashSet<U256>,
+    markets: Vec<[U256; 2]>,
+) -> Result<bool> {
+    let mut books_guard = books
+        .write()
+        .map_err(|_| PolyfillError::internal_simple("Polymarket 订单簿写锁已被污染"))?;
+    let mut changed = false;
+
+    for [up_asset_id, down_asset_id] in markets {
+        if up_asset_id == down_asset_id {
+            return Err(PolyfillError::validation(
+                "二元市场的两个 asset_id 不能相同",
+            ));
+        }
+
+        match books_guard.get(&up_asset_id) {
+            Some(view) => {
+                if *view.other_asset_id() != down_asset_id {
+                    return Err(PolyfillError::validation(format!(
+                        "asset_id {} 已绑定到其他二元市场",
+                        up_asset_id
+                    )));
+                }
+            }
+            None => {
+                if books_guard.get(&down_asset_id).is_some() {
+                    return Err(PolyfillError::validation(format!(
+                        "asset_id {} 已绑定到其他二元市场",
+                        down_asset_id
+                    )));
+                }
+                books_guard.insert(BinaryOrderBook::new(up_asset_id, down_asset_id)?)?;
+                changed = true;
+            }
+        }
+
+        if desired_asset_ids.insert(up_asset_id) {
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn remove_markets(
+    books: &Arc<RwLock<OrderBooks>>,
+    desired_asset_ids: &mut HashSet<U256>,
+    asset_ids: Vec<U256>,
+) -> Result<bool> {
+    let mut books_guard = books
+        .write()
+        .map_err(|_| PolyfillError::internal_simple("Polymarket 订单簿写锁已被污染"))?;
+    let mut changed = false;
+
+    for asset_id in asset_ids {
+        if let Some([up_asset_id, _down_asset_id]) = books_guard.remove(&asset_id) {
+            desired_asset_ids.remove(&up_asset_id);
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn side_key(side: Side) -> u8 {
+    match side {
+        Side::Buy => 0,
+        Side::Sell => 1,
+        Side::Unknown => unreachable!("unknown side is rejected before normalization"),
+        _ => unreachable!("future sdk side variant already rejected"),
+    }
+}
+
+fn side_from_key(side: u8) -> Side {
+    match side {
+        0 => Side::Buy,
+        1 => Side::Sell,
+        _ => unreachable!("only normalized side keys are stored"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polymarket_client_sdk::clob::ws::BookUpdate;
+    use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
+
+    fn asset(id: u64) -> U256 {
+        U256::from(id)
+    }
+
+    #[test]
+    fn test_build_books_registers_binary_markets() {
+        let markets = vec![[asset(1), asset(2)], [asset(3), asset(4)]];
+
+        let (books, asset_ids) = build_books(markets).unwrap();
+        let books = books.read().unwrap();
+
+        assert_eq!(asset_ids.len(), 2);
+        assert_eq!(books.len(), 2);
+    }
+
+    #[test]
+    fn test_handle_book_update_replaces_local_orderbook() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let update = BookUpdate::builder()
+            .asset_id(asset(1))
+            .market([9; 32].into())
+            .timestamp(123)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(44, 2))
+                    .size(Decimal::new(100, 0))
+                    .build(),
+            ])
+            .asks(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(56, 2))
+                    .size(Decimal::new(120, 0))
+                    .build(),
+            ])
+            .build();
+
+        handle_book_update(&books, update).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.best_bid(&asset(1)),
+            Some(Level::new(Decimal::new(44, 2), Decimal::new(100, 0)))
+        );
+        assert_eq!(
+            view.best_ask(&asset(1)),
+            Some(Level::new(Decimal::new(56, 2), Decimal::new(120, 0)))
+        );
+    }
+
+    #[test]
+    fn test_other_asset_uses_mirror_view() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let update = BookUpdate::builder()
+            .asset_id(asset(1))
+            .market([8; 32].into())
+            .timestamp(456)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(40, 2))
+                    .size(Decimal::new(50, 0))
+                    .build(),
+            ])
+            .asks(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(60, 2))
+                    .size(Decimal::new(70, 0))
+                    .build(),
+            ])
+            .build();
+
+        handle_book_update(&books, update).unwrap();
+
+        assert_eq!(
+            books.read().unwrap().best_bid(&asset(2)),
+            Some(Level::new(Decimal::new(40, 2), Decimal::new(70, 0)))
+        );
+        assert_eq!(
+            books.read().unwrap().best_ask(&asset(2)),
+            Some(Level::new(Decimal::new(60, 2), Decimal::new(50, 0)))
+        );
+        assert_eq!(
+            books.read().unwrap().mid(&asset(2)),
+            Some(Decimal::new(50, 2))
+        );
+    }
+
+    #[test]
+    fn test_handle_price_change_updates_single_level() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let update = BookUpdate::builder()
+            .asset_id(asset(1))
+            .market([7; 32].into())
+            .timestamp(100)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(44, 2))
+                    .size(Decimal::new(100, 0))
+                    .build(),
+            ])
+            .asks(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(56, 2))
+                    .size(Decimal::new(120, 0))
+                    .build(),
+            ])
+            .build();
+        handle_book_update(&books, update).unwrap();
+
+        let change = PriceChange::builder()
+            .market([7; 32].into())
+            .timestamp(101)
+            .price_changes(vec![
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(1))
+                    .price(Decimal::new(45, 2))
+                    .size(Decimal::new(90, 0))
+                    .side(polymarket_client_sdk::clob::types::Side::Buy)
+                    .hash("hash-2".to_string())
+                    .build(),
+            ])
+            .build();
+
+        handle_price_change(&books, change).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.best_bid(&asset(1)),
+            Some(Level::new(Decimal::new(45, 2), Decimal::new(90, 0)))
+        );
+        assert_eq!(
+            view.best_ask(&asset(1)),
+            Some(Level::new(Decimal::new(56, 2), Decimal::new(120, 0)))
+        );
+    }
+
+    #[test]
+    fn test_handle_price_change_without_size_keeps_existing_book() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let update = BookUpdate::builder()
+            .asset_id(asset(1))
+            .market([7; 32].into())
+            .timestamp(100)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(44, 2))
+                    .size(Decimal::new(100, 0))
+                    .build(),
+            ])
+            .asks(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(56, 2))
+                    .size(Decimal::new(120, 0))
+                    .build(),
+            ])
+            .build();
+        handle_book_update(&books, update).unwrap();
+
+        let change = PriceChange::builder()
+            .market([7; 32].into())
+            .timestamp(102)
+            .price_changes(vec![
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(1))
+                    .price(Decimal::new(45, 2))
+                    .side(polymarket_client_sdk::clob::types::Side::Buy)
+                    .best_bid(Decimal::new(45, 2))
+                    .best_ask(Decimal::new(56, 2))
+                    .hash("hash-3".to_string())
+                    .build(),
+            ])
+            .build();
+
+        handle_price_change(&books, change).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.best_bid(&asset(1)),
+            Some(Level::new(Decimal::new(44, 2), Decimal::new(100, 0)))
+        );
+        assert_eq!(
+            view.best_ask(&asset(1)),
+            Some(Level::new(Decimal::new(56, 2), Decimal::new(120, 0)))
+        );
+    }
+
+    #[test]
+    fn test_handle_price_change_dedupes_up_and_down_in_same_batch() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let change = PriceChange::builder()
+            .market([7; 32].into())
+            .timestamp(101)
+            .price_changes(vec![
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(1))
+                    .price(Decimal::new(45, 2))
+                    .size(Decimal::new(70, 0))
+                    .side(Side::Buy)
+                    .build(),
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(2))
+                    .price(Decimal::new(55, 2))
+                    .size(Decimal::new(90, 0))
+                    .side(Side::Sell)
+                    .build(),
+            ])
+            .build();
+
+        handle_price_change(&books, change).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.best_bid(&asset(1)),
+            Some(Level::new(Decimal::new(45, 2), Decimal::new(90, 0)))
+        );
+        assert_eq!(
+            view.best_ask(&asset(2)),
+            Some(Level::new(Decimal::new(55, 2), Decimal::new(90, 0)))
+        );
+    }
+
+    #[test]
+    fn test_handle_price_change_falls_back_when_normalized_sizes_conflict() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let change = PriceChange::builder()
+            .market([7; 32].into())
+            .timestamp(101)
+            .price_changes(vec![
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(1))
+                    .price(Decimal::new(45, 2))
+                    .size(Decimal::new(70, 0))
+                    .side(Side::Buy)
+                    .build(),
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(2))
+                    .price(Decimal::new(55, 2))
+                    .size(Decimal::new(90, 0))
+                    .side(Side::Sell)
+                    .build(),
+            ])
+            .build();
+
+        handle_price_change(&books, change).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.best_bid(&asset(1)),
+            Some(Level::new(Decimal::new(45, 2), Decimal::new(90, 0)))
+        );
+    }
+
+    #[test]
+    fn test_client_style_reads_can_return_depth_levels() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let update = BookUpdate::builder()
+            .asset_id(asset(1))
+            .market([7; 32].into())
+            .timestamp(100)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(44, 2))
+                    .size(Decimal::new(100, 0))
+                    .build(),
+                OrderBookLevel::builder()
+                    .price(Decimal::new(43, 2))
+                    .size(Decimal::new(90, 0))
+                    .build(),
+            ])
+            .asks(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(56, 2))
+                    .size(Decimal::new(120, 0))
+                    .build(),
+            ])
+            .build();
+
+        handle_book_update(&books, update).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.get(&asset(1)).unwrap().bids(2),
+            vec![
+                Level::new(Decimal::new(44, 2), Decimal::new(100, 0)),
+                Level::new(Decimal::new(43, 2), Decimal::new(90, 0))
+            ]
+        );
+        assert_eq!(
+            view.get(&asset(1)).unwrap().asks(1),
+            vec![Level::new(Decimal::new(56, 2), Decimal::new(120, 0))]
+        );
+    }
+
+}

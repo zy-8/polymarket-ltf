@@ -1,0 +1,18 @@
+[package]
+name = "polymarket-ltf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+futures = "0.3"
+rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+polymarket-client-sdk = { git = "https://github.com/Polymarket/rs-clob-client", branch = "main", features = ["clob", "data", "gamma", "rtds", "ws"] }
