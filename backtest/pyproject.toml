@@ -1,0 +1,32 @@
+[project]
+name = "polymarket-ltf-backtest"
+version = "0.1.0"
+description = "Crypto backtesting and research utilities for polymarket-ltf snapshot data"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.0",
+]
+authors = [
+    { name = "polymarket-ltf" },
+]
+
+[project.scripts]
+backtest = "backtest:main"
+scan = "scan:main"
+report = "report:main"
+
+[project.optional-dependencies]
+reports = [
+    "quantstats>=0.0.62",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["backtest", "report", "scan"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
