@@ -1,80 +1,114 @@
 # polymarket-ltf
 
-这是一个基于 Rust 的实时数据项目，当前围绕 Polymarket 市场发现、订单簿订阅、RTDS Chainlink 价格、Binance 参考价格以及 CSV 快照写入展开。
+`polymarket-ltf` 是一个面向 **LTF（Low Time Frame）** 的量化研究基础设施项目。  
+当前项目以 **Polymarket crypto 市场** 为核心研究对象，并引入 CEX 与 oracle 价格作为参考系，用于研究短周期偏离、验证策略、评估执行可行性，并逐步演进到更完整的量化与高频套利框架。
 
-## 模块说明
+## 定位
 
-- `src/types/crypto.rs`：跨 Binance / Polymarket / RTDS 共用的 `Symbol` 与 `Interval` 类型。
-- `src/binance/websocket.rs`：Binance `bookTicker` 订阅与本地缓存。
-- `src/polymarket/market_registry.rs`：活跃市场发现、本地注册表和订阅调度。
-- `src/polymarket/orderbook_stream.rs`：Polymarket 订单簿流与本地盘口缓存。
-- `src/polymarket/rtds_stream.rs`：Polymarket RTDS Chainlink 价格流。
-- `src/snapshot.rs`：snapshot 计算与 CSV 追加写入。
+这个仓库当前重点解决四件事：
 
-## 开发命令
+- 实时接入 Polymarket、CEX、oracle 等研究数据
+- 将多源数据聚合成稳定的 snapshot 研究输入
+- 对 snapshot 做离线回测、批量评估与策略验证
+- 沉淀研究、结果、日志和协作文档标准
+
+它适合被理解为：
+
+- Polymarket crypto 市场研究底座
+- LTF 价差与微观结构研究仓库
+- 多源数据驱动的策略工程起点
+
+它当前**不是**：
+
+- 完整实盘执行系统
+- 生产级订单管理与风控平台
+- 已上线的自动交易引擎
+
+## 当前范围
+
+当前仓库已经具备：
+
+- Polymarket 活跃市场发现与订单簿订阅
+- Binance `bookTicker` 参考中间价
+- Chainlink RTDS 锚定价格
+- 秒级 snapshot 生成与 CSV 落盘
+- 基于 snapshot 的 Polymarket `up/down` 双腿回测
+- `5m` / `15m` 分组的中文回测汇总
+
+当前仓库还没有完整覆盖：
+
+- 执行层
+- 风控层
+- 订单生命周期管理
+- 统一研究报表中心
+
+## 标准研究链路
+
+```text
+数据获取
+  -> 数据标准化
+  -> 特征构造与 snapshot
+  -> 回测与研究评估
+  -> 策略定义与实现
+  -> 执行候选 / 执行
+  -> 结果输出、日志归档与复盘
+```
+
+对这个项目来说，策略开发不应从“直接写信号”开始，而应从数据定义、fair value 定义、回测口径和结果可追溯性开始。
+
+## 仓库结构
+
+```text
+.
+├── benches/       # Rust 热路径性能基准
+├── docs/          # 主文档目录，以 3 份核心文档为准
+├── src/           # Rust 实时数据链路
+├── examples/      # 最小可运行示例
+├── backtest/      # Python crypto 回测与研究项目
+├── data/          # snapshot 输入与研究输出
+├── skills/        # 项目内 skill
+├── README.md
+└── AGENTS.md
+```
+
+## 文档地图
+
+当前 `docs/` 由 3 份主文档构成，分别覆盖项目总览、研究方法和开发规范。
+
+- [docs/project.md](docs/project.md)
+  项目定义、系统设计、架构摘要、研究边界和路线图摘要
+- [docs/research.md](docs/research.md)
+  研究工作流、量化与高频套利关键要素、核心问题、数据标准与策略准入清单
+- [docs/development.md](docs/development.md)
+  工程规范、低延迟约束、测试规则、数据结构设计和文档同步标准
+- [AGENTS.md](AGENTS.md)
+  仓库级协作入口
+- [backtest/README.md](backtest/README.md)
+  Python 回测层说明
+
+## 快速开始
+
+Rust:
 
 ```bash
 cargo check
-cargo fmt
-cargo test
-```
-
-日志通过 `RUST_LOG` 控制，例如：
-
-```bash
-RUST_LOG=info cargo run --example book_monitor
-RUST_LOG=debug cargo run --example snapshot_write
-```
-
-## 示例
-
-```bash
-cargo run --example book_monitor
-cargo run --example gamma_market_by_slug
+cargo bench --bench ws_hot_paths
 cargo run --example snapshot_write
-cargo run --example snapshot_write -- btc 5m data/snapshots
-cargo run --example clob_ok
 ```
 
-- `book_monitor`：刷新 market registry、调度 Polymarket 订阅，并打印当前盘口。
-- `gamma_market_by_slug`：生成当前和下一个 market slug，并查询对应的 Gamma 市场详情。
-- `snapshot_write`：启动 Binance、RTDS、market registry 和 orderbook stream，并持续将 snapshot 追加写入 CSV。
-- `clob_ok`：最小 CLOB 健康检查。
+Python:
 
-## Snapshot CSV
-
-当前 snapshot 列为：
-
-```text
-timestamp,binance_mid_price,chainlink_price,spread_binance_chainlink,spread_delta,chainlink_start_delta,up_bid_price,up_bid_size,up_ask_price,up_ask_size,down_bid_price,down_bid_size,down_ask_price,down_ask_size,z_score,vel_spread,up_mid_price_slope,binance_sigma,chainlink_change_30s_pct,chainlink_change_60s_pct,chainlink_run
+```bash
+cd backtest
+PYTHONPATH=src python3 -m backtest
+PYTHONPATH=src python3 -m scan --csv tests/fixtures/sample.csv --top-k 1
+PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-字段说明：
+## 建议阅读顺序
 
-- `timestamp`：当前 snapshot 写入时间，格式到毫秒。
-- `binance_mid_price`：Binance `bookTicker` 中间价，公式为 `(best_bid + best_ask) / 2`。
-- `chainlink_price`：当前最新的 Chainlink 价格。
-- `spread_binance_chainlink`：Binance 中间价与 Chainlink 价格差，公式为 `binance_mid_price - chainlink_price`。
-- `spread_delta`：当前 spread 相对上一次 snapshot 的变化量。
-- `chainlink_start_delta`：当前 Chainlink 价格相对当前 market 周期起点的变化量。
-- `up_bid_price`：当前 market 的 `up_asset_id` 最优买价。
-- `up_bid_size`：当前 market 的 `up_asset_id` 最优买量。
-- `up_ask_price`：当前 market 的 `up_asset_id` 最优卖价。
-- `up_ask_size`：当前 market 的 `up_asset_id` 最优卖量。
-- `down_bid_price`：当前 market 的 `down_asset_id` 最优买价。
-- `down_bid_size`：当前 market 的 `down_asset_id` 最优买量。
-- `down_ask_price`：当前 market 的 `down_asset_id` 最优卖价。
-- `down_ask_size`：当前 market 的 `down_asset_id` 最优卖量。
-- `z_score`：当前 spread 在滚动窗口内的标准分数，窗口为 `120s`。
-- `vel_spread`：spread 的短周期变化速度，当前窗口为 `5s`。
-- `up_mid_price_slope`：`up` 方向盘口中间价斜率，当前窗口为 `5s`。
-- `binance_sigma`：Binance 中间价在滚动窗口内的标准差，窗口为 `30s`。
-- `chainlink_change_30s_pct`：Chainlink 价格相对 30 秒前的百分比变化。
-- `chainlink_change_60s_pct`：Chainlink 价格相对 60 秒前的百分比变化。
-- `chainlink_run`：Chainlink 价格连续同方向变动次数。
-
-CSV 默认按以下目录结构写入：
-
-```text
-data/snapshots/<symbol>/<interval>/<market_slug>.csv
-```
+1. [docs/project.md](docs/project.md)
+2. [docs/research.md](docs/research.md)
+3. [docs/development.md](docs/development.md)
+4. [AGENTS.md](AGENTS.md)
+5. [backtest/README.md](backtest/README.md)

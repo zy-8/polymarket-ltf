@@ -1,0 +1,4 @@
+interface:
+  display_name: "LTF 实时研究开发"
+  short_description: "处理本仓库低延迟 Rust 实时链路、多源数据接入、snapshot 与结构优化"
+  default_prompt: "使用 $dev 处理本仓库低延迟 Rust 实时链路开发，优先复用现有模块，控制热路径分配与锁竞争，并保持 snapshot 语义、测试和文档一致。"

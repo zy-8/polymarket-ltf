@@ -1,0 +1,4 @@
+interface:
+  display_name: "LTF 回测与研究"
+  short_description: "处理本仓库 snapshot 回测、策略验证、结构化结果输出与研究规范"
+  default_prompt: "使用 $backtest 处理本仓库 snapshot 回测和策略研究，遵守策略准入清单、结果标准、延迟约束与中文汇总约定。"
