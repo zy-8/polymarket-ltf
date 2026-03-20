@@ -132,19 +132,7 @@ impl BinaryOrderBook {
     /// 如果传入的是 `down_asset_id` 视角的 bids / asks，内部会先镜像回 `up_asset_id`
     /// 视角再落盘。
     pub fn replace(&mut self, asset_id: &U256, bids: Vec<Level>, asks: Vec<Level>) -> Result<()> {
-        match self.resolve(asset_id)? {
-            AssetSlot::Up => {
-                self.up_bids = levels_to_map(bids);
-                self.up_asks = levels_to_map(asks);
-            }
-            AssetSlot::Down => {
-                self.up_bids = mirrored_asks_to_bids(asks);
-                self.up_asks = mirrored_bids_to_asks(bids);
-            }
-        }
-
-        self.refresh_best_quotes();
-        Ok(())
+        self.replace_from_iters(asset_id, bids, asks)
     }
 
     /// 按某个 asset 的视角更新单个价格档位。
@@ -171,7 +159,34 @@ impl BinaryOrderBook {
             AssetSlot::Down => (mirror_side(side)?, mirror_price(price)),
         };
 
-        let levels = match canonical_side {
+        self.set_canonical(canonical_side, canonical_price, size)
+    }
+
+    fn replace_from_iters<I, J>(&mut self, asset_id: &U256, bids: I, asks: J) -> Result<()>
+    where
+        I: IntoIterator<Item = Level>,
+        J: IntoIterator<Item = Level>,
+    {
+        match self.resolve(asset_id)? {
+            AssetSlot::Up => {
+                self.up_bids = levels_to_map(bids);
+                self.up_asks = levels_to_map(asks);
+            }
+            AssetSlot::Down => {
+                self.up_bids = mirrored_asks_to_bids(asks);
+                self.up_asks = mirrored_bids_to_asks(bids);
+            }
+        }
+
+        self.refresh_best_quotes();
+        Ok(())
+    }
+
+    // 这里直接写 canonical `up_asset_id` 视角，不再做镜像转换。
+    // 调用方如果来自 `down_asset_id`，应先在外层完成归一化。
+    fn set_canonical(&mut self, side: Side, price: Decimal, size: Decimal) -> Result<()> {
+        let side = validate_side(side)?;
+        let levels = match side {
             Side::Buy => &mut self.up_bids,
             Side::Sell => &mut self.up_asks,
             Side::Unknown => unreachable!("unknown side already validated"),
@@ -179,12 +194,12 @@ impl BinaryOrderBook {
         };
 
         if size.is_zero() {
-            levels.remove(&canonical_price);
+            levels.remove(&price);
         } else {
-            levels.insert(canonical_price, size);
+            levels.insert(price, size);
         }
 
-        self.refresh_best_quote(canonical_side);
+        self.refresh_best_quote(side);
         Ok(())
     }
 
@@ -392,6 +407,19 @@ impl OrderBooks {
     }
 
     pub fn replace(&mut self, asset_id: &U256, bids: Vec<Level>, asks: Vec<Level>) -> Result<()> {
+        self.replace_from_iters(asset_id, bids, asks)
+    }
+
+    pub(crate) fn replace_from_iters<I, J>(
+        &mut self,
+        asset_id: &U256,
+        bids: I,
+        asks: J,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = Level>,
+        J: IntoIterator<Item = Level>,
+    {
         let book_idx = self
             .asset_index
             .get(asset_id)
@@ -403,7 +431,7 @@ impl OrderBooks {
             PolyfillError::internal_simple(format!("未找到 asset_id {} 对应的订单簿", asset_id))
         })?;
 
-        book.replace(asset_id, bids, asks)
+        book.replace_from_iters(asset_id, bids, asks)
     }
 
     pub fn set_level(
@@ -427,7 +455,40 @@ impl OrderBooks {
         book.set_level(asset_id, side, price, size)
     }
 
-    pub fn normalize_level_update(
+    /// 直接应用一条 canonical 视角的档位更新。
+    ///
+    /// 调用方必须保证 `asset_id` 已经是 `up_asset_id`，这里不再做镜像归一化。
+    pub(crate) fn apply_canonical(
+        &mut self,
+        asset_id: &U256,
+        side: Side,
+        price: Decimal,
+        size: Decimal,
+    ) -> Result<()> {
+        let lookup =
+            self.asset_index.get(asset_id).copied().ok_or_else(|| {
+                PolyfillError::validation(format!("未找到 asset_id {}", asset_id))
+            })?;
+
+        if lookup.slot != AssetSlot::Up {
+            return Err(PolyfillError::validation(format!(
+                "canonical 更新必须指向 up_asset_id: {}",
+                asset_id
+            )));
+        }
+
+        let book = self.books.get_mut(lookup.book_idx).ok_or_else(|| {
+            PolyfillError::internal_simple(format!("未找到 asset_id {} 对应的订单簿", asset_id))
+        })?;
+
+        book.set_canonical(side, price, size)
+    }
+
+    /// 把任意 asset 视角下的一条档位更新归一化到 `up_asset_id` 视角。
+    ///
+    /// 这个方法只做坐标变换，不修改订单簿，适合在 fast path 里先判断两条更新
+    /// 是否实际上指向同一个 canonical level。
+    pub fn normalize_level(
         &self,
         asset_id: &U256,
         side: Side,
@@ -525,7 +586,7 @@ fn top_ask(levels: &BTreeMap<Decimal, Decimal>) -> Option<Level> {
         .map(|(price, size)| Level::new(*price, *size))
 }
 
-fn levels_to_map(levels: Vec<Level>) -> BTreeMap<Decimal, Decimal> {
+fn levels_to_map(levels: impl IntoIterator<Item = Level>) -> BTreeMap<Decimal, Decimal> {
     let mut map = BTreeMap::new();
 
     for level in levels {
@@ -571,7 +632,7 @@ fn collect_mirrored_asks(levels: &BTreeMap<Decimal, Decimal>, limit: usize) -> V
         .collect()
 }
 
-fn mirrored_asks_to_bids(asks: Vec<Level>) -> BTreeMap<Decimal, Decimal> {
+fn mirrored_asks_to_bids(asks: impl IntoIterator<Item = Level>) -> BTreeMap<Decimal, Decimal> {
     let mut map = BTreeMap::new();
 
     for level in asks {
@@ -583,7 +644,7 @@ fn mirrored_asks_to_bids(asks: Vec<Level>) -> BTreeMap<Decimal, Decimal> {
     map
 }
 
-fn mirrored_bids_to_asks(bids: Vec<Level>) -> BTreeMap<Decimal, Decimal> {
+fn mirrored_bids_to_asks(bids: impl IntoIterator<Item = Level>) -> BTreeMap<Decimal, Decimal> {
     let mut map = BTreeMap::new();
 
     for level in bids {
@@ -821,14 +882,14 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_level_update_can_map_down_back_to_up() {
+    fn test_normalize_level_can_map_down_back_to_up() {
         let mut books = OrderBooks::new();
         books
             .insert(BinaryOrderBook::new(asset(1), asset(2)).unwrap())
             .unwrap();
 
         let update = books
-            .normalize_level_update(
+            .normalize_level(
                 &asset(2),
                 Side::Sell,
                 Decimal::new(55, 2),

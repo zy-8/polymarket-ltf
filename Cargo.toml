@@ -14,5 +14,13 @@ thiserror = "2.0"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 polymarket-client-sdk = { git = "https://github.com/Polymarket/rs-clob-client", branch = "main", features = ["clob", "data", "gamma", "rtds", "ws"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "ws_hot_paths"
+harness = false

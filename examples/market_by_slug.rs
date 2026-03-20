@@ -1,11 +1,11 @@
 use anyhow::Result;
+use polymarket_client_sdk::gamma::Client;
+use polymarket_client_sdk::gamma::types::request::MarketBySlugRequest;
 use polymarket_ltf::polymarket::market_registry::{
     active_markets, current_active_market, next_active_market,
 };
 use polymarket_ltf::polymarket::utils::crypto_market::{current_slug, next_slug};
 use polymarket_ltf::types::crypto::{Interval, Symbol};
-use polymarket_client_sdk::gamma::Client;
-use polymarket_client_sdk::gamma::types::request::MarketBySlugRequest;
 use tracing::info;
 
 #[tokio::main]

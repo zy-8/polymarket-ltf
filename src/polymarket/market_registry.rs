@@ -7,9 +7,7 @@
 
 use crate::errors::{PolyfillError, Result};
 use crate::polymarket::orderbook_stream;
-use crate::polymarket::utils::crypto_market::{
-    current_slug, next_slug, slugs_for_hours,
-};
+use crate::polymarket::utils::crypto_market::{current_slug, next_slug, slugs_for_hours};
 use crate::types::crypto::{Interval, Symbol};
 use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
@@ -59,7 +57,11 @@ impl MarketRegistry {
         Ok(markets)
     }
 
-    pub fn next_market(&self, symbols: &[Symbol], intervals: &[Interval]) -> Result<Vec<[U256; 2]>> {
+    pub fn next_market(
+        &self,
+        symbols: &[Symbol],
+        intervals: &[Interval],
+    ) -> Result<Vec<[U256; 2]>> {
         let mut markets = Vec::new();
 
         for slug in next_slugs(symbols, intervals)? {
@@ -71,11 +73,7 @@ impl MarketRegistry {
         Ok(markets)
     }
 
-    pub fn markets(
-        &self,
-        symbols: &[Symbol],
-        intervals: &[Interval],
-    ) -> Result<Vec<[U256; 2]>> {
+    pub fn markets(&self, symbols: &[Symbol], intervals: &[Interval]) -> Result<Vec<[U256; 2]>> {
         let mut markets = Vec::new();
 
         for slug in expected_slugs(symbols, intervals)? {
@@ -171,7 +169,7 @@ pub fn spawn_subscription_scheduler(
         loop {
             let next_markets = {
                 let markets = match registry.read() {
-                    Ok(guard) => guard.markets(&symbols, &intervals),
+                    Ok(guard) => guard.current_market(&symbols, &intervals),
                     Err(_) => Err(PolyfillError::internal_simple(
                         "Polymarket market registry 读锁已被污染",
                     )),
@@ -271,16 +269,14 @@ async fn discover_by_slugs(
     slugs: Vec<String>,
 ) -> Result<HashMap<String, [U256; 2]>> {
     let markets = client
-        .markets(
-            &MarketsRequest::builder()
-                .slug(slugs)
-                .closed(false)
-                .build(),
-        )
+        .markets(&MarketsRequest::builder().slug(slugs).closed(false).build())
         .await
         .map_err(|e| PolyfillError::internal_simple(format!("查询 Gamma 市场失败: {e}")))?;
 
-    Ok(markets.into_iter().filter_map(active_market_entry).collect())
+    Ok(markets
+        .into_iter()
+        .filter_map(active_market_entry)
+        .collect())
 }
 
 fn active_market_entry(market: Market) -> Option<(String, [U256; 2])> {

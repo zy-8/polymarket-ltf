@@ -79,7 +79,10 @@ impl RollingBuffer {
     }
 
     fn push(&mut self, timestamp_ms: i64, value: Decimal) {
-        self.data.push_back(TimedValue { timestamp_ms, value });
+        self.data.push_back(TimedValue {
+            timestamp_ms,
+            value,
+        });
         let cutoff_ms = timestamp_ms - (self.max_seconds as i64 * 1_000);
 
         while let Some(front) = self.data.front() {
@@ -241,7 +244,8 @@ impl SnapshotState {
 
     fn update_market_mid(&mut self, timestamp_ms: i64, mid: Option<Decimal>) {
         if let Some(mid) = mid {
-            self.market_mid_prices.push(timestamp_ms, quantize_price(mid));
+            self.market_mid_prices
+                .push(timestamp_ms, quantize_price(mid));
         }
     }
 
@@ -293,8 +297,7 @@ impl SnapshotState {
             .market_mid_prices
             .value_at(ts_ms, SLOPE_WINDOW_SECS)
             .unwrap_or(market_mid);
-        let slope_price =
-            (market_mid - market_prev) / Decimal::from(SLOPE_WINDOW_SECS as i64);
+        let slope_price = (market_mid - market_prev) / Decimal::from(SLOPE_WINDOW_SECS as i64);
 
         let changes = CHANGE_WINDOWS_SECS
             .iter()
@@ -306,8 +309,8 @@ impl SnapshotState {
                 if old_reference >= MIN_VALID_CHANGE_PRICE
                     && chainlink_price >= MIN_VALID_CHANGE_PRICE
                 {
-                    let raw = ((chainlink_price - old_reference) / old_reference)
-                        * Decimal::new(100, 0);
+                    let raw =
+                        ((chainlink_price - old_reference) / old_reference) * Decimal::new(100, 0);
                     raw.max(-MAX_CHANGE_PCT).min(MAX_CHANGE_PCT).round_dp(4)
                 } else {
                     Decimal::ZERO
@@ -336,7 +339,10 @@ impl SnapshotState {
             z_score: z_score.round_dp(4),
             vel_spread: vel_spread.round_dp(6),
             up_mid_price_slope: slope_price.round_dp(6),
-            binance_sigma: self.binance_prices.std(ts_ms, SIGMA_WINDOW_SECS).round_dp(4),
+            binance_sigma: self
+                .binance_prices
+                .std(ts_ms, SIGMA_WINDOW_SECS)
+                .round_dp(4),
             changes,
             chainlink_run: self.run_count,
         }
@@ -378,7 +384,11 @@ impl Snapshot {
         }
     }
 
-    pub fn snapshot(&mut self, symbol: Symbol, interval: Interval) -> Result<Option<SnapshotWrite>> {
+    pub fn snapshot(
+        &mut self,
+        symbol: Symbol,
+        interval: Interval,
+    ) -> Result<Option<SnapshotWrite>> {
         let market_slug = current_slug(symbol, interval)?;
         let market = self
             .registry
@@ -400,10 +410,7 @@ impl Snapshot {
 
         let ts_ms = Utc::now().timestamp_millis();
         let key = (symbol, interval);
-        let state = self
-            .states
-            .entry(key)
-            .or_insert_with(SnapshotState::new);
+        let state = self.states.entry(key).or_insert_with(SnapshotState::new);
 
         if self.current_slugs.get(&key) != Some(&market_slug) {
             state.reset_period();
@@ -473,11 +480,7 @@ impl Snapshot {
     }
 }
 
-fn append_record_row(
-    path: &Path,
-    record: &SnapshotWrite,
-    change_windows: &[u64],
-) -> Result<()> {
+fn append_record_row(path: &Path, record: &SnapshotWrite, change_windows: &[u64]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             PolyfillError::internal_simple(format!(

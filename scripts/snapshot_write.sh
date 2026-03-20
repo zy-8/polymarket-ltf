@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_DIR="${ROOT_DIR}/.run"
 LOG_DIR="${ROOT_DIR}/logs"
 PID_FILE="${PID_DIR}/snapshot_write.pid"
-LOG_FILE="${LOG_DIR}/snapshot_write.log"
+BIN_PATH="${ROOT_DIR}/target/debug/examples/snapshot_write"
 
 usage() {
   cat <<'EOF'
@@ -44,14 +44,15 @@ start() {
   cargo build --example snapshot_write
 
   echo "starting snapshot_write in background..."
-  nohup cargo run --example snapshot_write -- "${SYMBOL}" "${INTERVAL}" "${OUTPUT_DIR}" \
-    > "${LOG_FILE}" 2>&1 &
+  nohup env POLYMARKET_LTF_LOG_DIR="${LOG_DIR}" \
+    "${BIN_PATH}" "${SYMBOL}" "${INTERVAL}" "${OUTPUT_DIR}" \
+    > /dev/null 2>&1 &
 
   pid="$!"
   echo "${pid}" > "${PID_FILE}"
 
   echo "started: pid=${pid}"
-  echo "log: ${LOG_FILE}"
+  echo "daily logs: ${LOG_DIR}/YYYY-MM-DD.log"
 }
 
 stop() {
@@ -74,7 +75,7 @@ stop() {
 status() {
   if is_running; then
     echo "snapshot_write is running: pid=$(cat "${PID_FILE}")"
-    echo "log: ${LOG_FILE}"
+    echo "daily logs: ${LOG_DIR}/YYYY-MM-DD.log"
   else
     echo "snapshot_write is not running"
     [ -f "${PID_FILE}" ] && rm -f "${PID_FILE}"

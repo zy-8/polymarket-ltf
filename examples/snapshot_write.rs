@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_ltf::binance::Client as BinanceClient;
 use polymarket_ltf::polymarket::market_registry::{
     MarketRegistry, refresh_registry, spawn_auto_refresh, spawn_subscription_scheduler,
@@ -11,13 +12,19 @@ use polymarket_ltf::polymarket::orderbook_stream::Client as OrderbookStreamClien
 use polymarket_ltf::polymarket::rtds_stream::Client as RtdsStreamClient;
 use polymarket_ltf::snapshot::Snapshot;
 use polymarket_ltf::types::crypto::{Interval, Symbol};
-use polymarket_client_sdk::gamma::Client as GammaClient;
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     polymarket_ltf::logging::init();
 
+    if let Err(err) = run().await {
+        error!(error = %err, error_debug = ?err, "snapshot_write exited with error");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let symbol = args
         .next()
@@ -60,7 +67,11 @@ async fn main() -> Result<()> {
             match snapshot.write_csv(symbol, *interval, &output_dir)? {
                 Some(_row) => {}
                 None => {
-                    info!(?symbol, ?interval, "Snapshot skipped because current market data is incomplete");
+                    info!(
+                        ?symbol,
+                        ?interval,
+                        "Snapshot skipped because current market data is incomplete"
+                    );
                 }
             }
         }

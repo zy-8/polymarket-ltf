@@ -36,7 +36,9 @@ impl Client {
             let client = client.clone();
 
             let task = tokio::spawn(async move {
-                let stream = match client.subscribe_chainlink_prices(Some(chainlink_symbol(symbol).to_owned())) {
+                let stream = match client
+                    .subscribe_chainlink_prices(Some(chainlink_symbol(symbol).to_owned()))
+                {
                     Ok(stream) => stream,
                     Err(error) => {
                         warn!("创建 RTDS Chainlink 订阅失败: {}", error);
@@ -80,7 +82,10 @@ impl Client {
     }
 
     pub fn snapshot(&self) -> HashMap<Symbol, ChainlinkPrice> {
-        self.prices.read().map(|guard| guard.clone()).unwrap_or_default()
+        self.prices
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     pub fn close(&self) {

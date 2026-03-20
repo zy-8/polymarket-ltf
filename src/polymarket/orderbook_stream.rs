@@ -20,12 +20,12 @@
 //! - `down_asset_id` 永远通过镜像视图读取
 
 use crate::errors::{PolyfillError, Result};
-use crate::polymarket::types::orderbook::{BinaryOrderBook, Level, OrderBooks, Side};
+use crate::polymarket::types::orderbook::{BinaryOrderBook, Level, OrderBooks};
 use futures::{StreamExt, stream::select};
 use polymarket_client_sdk::clob::ws::{BookUpdate, Client as WsClient, PriceChange};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -197,33 +197,30 @@ async fn run_subscription_loop(
                                     match apply_command(command, &books, &mut desired_asset_ids) {
                                         Ok(ControlFlow::Continue) => {}
                                         Ok(ControlFlow::Rebuild) => {
-                                            let _ = client.unsubscribe_orderbook(&current_asset_ids);
-                                            let _ = client.unsubscribe_prices(&current_asset_ids);
+                                            unsubscribe_all(&client, &current_asset_ids);
                                             should_rebuild = true;
                                             break;
                                         }
                                         Ok(ControlFlow::Shutdown) | Err(_) => {
-                                            let _ = client.unsubscribe_orderbook(&current_asset_ids);
-                                            let _ = client.unsubscribe_prices(&current_asset_ids);
+                                            unsubscribe_all(&client, &current_asset_ids);
                                             return;
                                         }
                                     }
                                 }
                                 None => {
-                                    let _ = client.unsubscribe_orderbook(&current_asset_ids);
-                                    let _ = client.unsubscribe_prices(&current_asset_ids);
+                                    unsubscribe_all(&client, &current_asset_ids);
                                     return;
                                 }
                             }
                         }
                         message = stream.next() => match message {
                             Some(Ok(StreamEvent::Book(update))) => {
-                                if let Err(error) = handle_book_update(&books, update) {
+                                if let Err(error) = apply_book_update(&books, update) {
                                     warn!("应用 Polymarket BookUpdate 失败: {}", error);
                                 }
                             }
                             Some(Ok(StreamEvent::PriceChange(change))) => {
-                                if let Err(error) = handle_price_change(&books, change) {
+                                if let Err(error) = apply_price_change(&books, change) {
                                     warn!("应用 Polymarket PriceChange 失败: {}", error);
                                 }
                             }
@@ -255,66 +252,95 @@ async fn run_subscription_loop(
 }
 
 // 把 SDK 的整本快照翻译成 `OrderBooks::replace(...)`。
-fn handle_book_update(books: &Arc<RwLock<OrderBooks>>, update: BookUpdate) -> Result<()> {
-    let bids = update
-        .bids
-        .into_iter()
-        .map(|level| Level::new(level.price, level.size))
-        .collect::<Vec<_>>();
-    let asks = update
-        .asks
-        .into_iter()
-        .map(|level| Level::new(level.price, level.size))
-        .collect::<Vec<_>>();
+fn apply_book_update(books: &Arc<RwLock<OrderBooks>>, update: BookUpdate) -> Result<()> {
+    let BookUpdate {
+        asset_id,
+        bids,
+        asks,
+        ..
+    } = update;
 
     let mut books_guard = books
         .write()
         .map_err(|_| PolyfillError::internal_simple("Polymarket 订单簿写锁已被污染"))?;
-    books_guard.replace(&update.asset_id, bids, asks)?;
+    books_guard.replace_from_iters(
+        &asset_id,
+        bids.into_iter()
+            .map(|level| Level::new(level.price, level.size)),
+        asks.into_iter()
+            .map(|level| Level::new(level.price, level.size)),
+    )?;
 
     Ok(())
 }
 
-// 把 SDK 的单档变更翻译成 `OrderBooks::set_level(...)`。
-fn handle_price_change(books: &Arc<RwLock<OrderBooks>>, change: PriceChange) -> Result<()> {
+// PriceChange 主路径先尝试 2-entry 镜像 pair。
+// 这是当前真实 WS 样本里的主流形状；未命中时发 warning 并退回逐条应用，
+// 让协议漂移变成可观测事件，而不是为冷路径常驻通用 dedupe 成本。
+fn apply_price_change(books: &Arc<RwLock<OrderBooks>>, change: PriceChange) -> Result<()> {
+    let PriceChange { price_changes, .. } = change;
+
     let mut books_guard = books
         .write()
         .map_err(|_| PolyfillError::internal_simple("Polymarket 订单簿写锁已被污染"))?;
-    let mut raw_updates = Vec::new();
-    let mut normalized = HashMap::new();
-    let mut inconsistent = false;
+    if try_apply_pair_fast_path(&mut books_guard, &price_changes)? {
+        return Ok(());
+    }
 
-    for entry in change.price_changes {
+    warn!(
+        entries = price_changes.len(),
+        "Polymarket PriceChange 未命中 2-entry 镜像 fast path，退回逐条应用"
+    );
+    for entry in price_changes {
         let size = match entry.size {
             Some(size) => size,
             None => continue,
         };
-        raw_updates.push((entry.asset_id, entry.side, entry.price, size));
-
-        let update =
-            books_guard.normalize_level_update(&entry.asset_id, entry.side, entry.price, size)?;
-        let key = (update.asset_id, side_key(update.side), update.price);
-
-        if let Some(existing_size) = normalized.insert(key, update.size) {
-            if existing_size != update.size {
-                inconsistent = true;
-            }
-        }
-    }
-
-    if inconsistent {
-        warn!("Polymarket PriceChange 同批次双边归一化后不一致，退回逐条应用");
-        for (asset_id, side, price, size) in raw_updates {
-            books_guard.set_level(&asset_id, side, price, size)?;
-        }
-        return Ok(());
-    }
-
-    for ((asset_id, side, price), size) in normalized {
-        books_guard.set_level(&asset_id, side_from_key(side), price, size)?;
+        books_guard.set_level(&entry.asset_id, entry.side, entry.price, size)?;
     }
 
     Ok(())
+}
+
+fn try_apply_pair_fast_path(
+    books: &mut OrderBooks,
+    price_changes: &[polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry],
+) -> Result<bool> {
+    let [first, second] = price_changes else {
+        return Ok(false);
+    };
+
+    let Some(first_size) = first.size else {
+        return Ok(false);
+    };
+    let Some(second_size) = second.size else {
+        return Ok(false);
+    };
+
+    let first_update =
+        books.normalize_level(&first.asset_id, first.side, first.price, first_size)?;
+    let second_update =
+        books.normalize_level(&second.asset_id, second.side, second.price, second_size)?;
+
+    // fast path 只接受两个 entry 归一化后完全相同的情况。
+    // 这样 up/down 镜像对会被压成一次 canonical 写入，而非镜像批次不会被误折叠。
+    if first_update != second_update {
+        return Ok(false);
+    }
+
+    books.apply_canonical(
+        &first_update.asset_id,
+        first_update.side,
+        first_update.price,
+        first_update.size,
+    )?;
+
+    Ok(true)
+}
+
+fn unsubscribe_all(client: &WsClient, asset_ids: &[U256]) {
+    let _ = client.unsubscribe_orderbook(asset_ids);
+    let _ = client.unsubscribe_prices(asset_ids);
 }
 
 #[cfg(test)]
@@ -377,6 +403,8 @@ fn apply_command(
     books: &Arc<RwLock<OrderBooks>>,
     desired_asset_ids: &mut HashSet<U256>,
 ) -> Result<ControlFlow> {
+    // 命令结果不仅表示是否成功，还要告诉外层订阅循环是否必须重建连接。
+    // subscribe/unsubscribe 改变了 asset 集合，因此由外层统一决定何时 rebuild。
     match command {
         Command::Subscribe(markets) => {
             let changed = register_markets(books, desired_asset_ids, markets)?;
@@ -464,26 +492,10 @@ fn remove_markets(
     Ok(changed)
 }
 
-fn side_key(side: Side) -> u8 {
-    match side {
-        Side::Buy => 0,
-        Side::Sell => 1,
-        Side::Unknown => unreachable!("unknown side is rejected before normalization"),
-        _ => unreachable!("future sdk side variant already rejected"),
-    }
-}
-
-fn side_from_key(side: u8) -> Side {
-    match side {
-        0 => Side::Buy,
-        1 => Side::Sell,
-        _ => unreachable!("only normalized side keys are stored"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::polymarket::types::orderbook::Side;
     use polymarket_client_sdk::clob::ws::BookUpdate;
     use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
 
@@ -524,7 +536,7 @@ mod tests {
             ])
             .build();
 
-        handle_book_update(&books, update).unwrap();
+        apply_book_update(&books, update).unwrap();
 
         let view = books.read().unwrap();
         assert_eq!(
@@ -559,7 +571,7 @@ mod tests {
             ])
             .build();
 
-        handle_book_update(&books, update).unwrap();
+        apply_book_update(&books, update).unwrap();
 
         assert_eq!(
             books.read().unwrap().best_bid(&asset(2)),
@@ -596,7 +608,7 @@ mod tests {
                     .build(),
             ])
             .build();
-        handle_book_update(&books, update).unwrap();
+        apply_book_update(&books, update).unwrap();
 
         let change = PriceChange::builder()
             .market([7; 32].into())
@@ -612,7 +624,7 @@ mod tests {
             ])
             .build();
 
-        handle_price_change(&books, change).unwrap();
+        apply_price_change(&books, change).unwrap();
 
         let view = books.read().unwrap();
         assert_eq!(
@@ -646,7 +658,7 @@ mod tests {
                     .build(),
             ])
             .build();
-        handle_book_update(&books, update).unwrap();
+        apply_book_update(&books, update).unwrap();
 
         let change = PriceChange::builder()
             .market([7; 32].into())
@@ -663,7 +675,7 @@ mod tests {
             ])
             .build();
 
-        handle_price_change(&books, change).unwrap();
+        apply_price_change(&books, change).unwrap();
 
         let view = books.read().unwrap();
         assert_eq!(
@@ -687,7 +699,7 @@ mod tests {
                 polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(45, 2))
-                    .size(Decimal::new(70, 0))
+                    .size(Decimal::new(90, 0))
                     .side(Side::Buy)
                     .build(),
                 polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
@@ -699,7 +711,7 @@ mod tests {
             ])
             .build();
 
-        handle_price_change(&books, change).unwrap();
+        apply_price_change(&books, change).unwrap();
 
         let view = books.read().unwrap();
         assert_eq!(
@@ -709,6 +721,61 @@ mod tests {
         assert_eq!(
             view.best_ask(&asset(2)),
             Some(Level::new(Decimal::new(55, 2), Decimal::new(90, 0)))
+        );
+    }
+
+    #[test]
+    fn test_handle_price_change_non_fast_path_batch_applies_entries_sequentially() {
+        let (books, ..) = build_books(vec![[asset(1), asset(2)]]).unwrap();
+
+        let update = BookUpdate::builder()
+            .asset_id(asset(1))
+            .market([7; 32].into())
+            .timestamp(100)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(44, 2))
+                    .size(Decimal::new(100, 0))
+                    .build(),
+            ])
+            .asks(vec![
+                OrderBookLevel::builder()
+                    .price(Decimal::new(56, 2))
+                    .size(Decimal::new(120, 0))
+                    .build(),
+            ])
+            .build();
+        apply_book_update(&books, update).unwrap();
+
+        let change = PriceChange::builder()
+            .market([7; 32].into())
+            .timestamp(101)
+            .price_changes(vec![
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(1))
+                    .price(Decimal::new(45, 2))
+                    .size(Decimal::new(90, 0))
+                    .side(Side::Buy)
+                    .build(),
+                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                    .asset_id(asset(1))
+                    .price(Decimal::new(55, 2))
+                    .size(Decimal::new(80, 0))
+                    .side(Side::Sell)
+                    .build(),
+            ])
+            .build();
+
+        apply_price_change(&books, change).unwrap();
+
+        let view = books.read().unwrap();
+        assert_eq!(
+            view.best_bid(&asset(1)),
+            Some(Level::new(Decimal::new(45, 2), Decimal::new(90, 0)))
+        );
+        assert_eq!(
+            view.best_ask(&asset(1)),
+            Some(Level::new(Decimal::new(55, 2), Decimal::new(80, 0)))
         );
     }
 
@@ -735,7 +802,7 @@ mod tests {
             ])
             .build();
 
-        handle_price_change(&books, change).unwrap();
+        apply_price_change(&books, change).unwrap();
 
         let view = books.read().unwrap();
         assert_eq!(
@@ -770,7 +837,7 @@ mod tests {
             ])
             .build();
 
-        handle_book_update(&books, update).unwrap();
+        apply_book_update(&books, update).unwrap();
 
         let view = books.read().unwrap();
         assert_eq!(
@@ -785,5 +852,4 @@ mod tests {
             vec![Level::new(Decimal::new(56, 2), Decimal::new(120, 0))]
         );
     }
-
 }
