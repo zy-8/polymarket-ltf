@@ -17,9 +17,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant, sleep, sleep_until};
-use tracing::{info, warn};
+use tracing::warn;
 
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const AUTO_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const AUTO_REFRESH_MAX_RETRIES: usize = 5;
 const REGISTRY_HORIZON_HOURS: u32 = 2;
 const AUTO_SWITCH_GRACE: Duration = Duration::from_secs(1);
 
@@ -129,23 +131,30 @@ pub fn spawn_auto_refresh(
         let client = GammaClient::default();
 
         loop {
-            match refresh_registry(
-                &registry,
-                &client,
-                &symbols,
-                &intervals,
-            )
-            .await
-            {
-                Ok(count) => {
-                    info!(
-                        "Polymarket market registry 已刷新: symbols={:?}, intervals={:?}, horizon_hours={}, markets={}",
-                        symbols, intervals, REGISTRY_HORIZON_HOURS, count
+            let mut final_error = None;
+
+            for _attempt in 0..AUTO_REFRESH_MAX_RETRIES {
+                match refresh_registry(&registry, &client, &symbols, &intervals).await {
+                    Ok(_) => {
+                        final_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        final_error = Some(error);
+                        sleep(AUTO_REFRESH_RETRY_INTERVAL).await;
+                    }
+                }
+            }
+
+            if let Some(error) = final_error {
+                    warn!(
+                        "Polymarket market registry 自动刷新失败: {}, retry_interval_secs={}, max_retries={}, horizon_hours={}",
+                        error,
+                        AUTO_REFRESH_RETRY_INTERVAL.as_secs()
+                        ,
+                        AUTO_REFRESH_MAX_RETRIES,
+                        REGISTRY_HORIZON_HOURS
                     );
-                }
-                Err(error) => {
-                    warn!("Polymarket market registry 自动刷新失败: {}", error);
-                }
             }
 
             sleep(AUTO_REFRESH_INTERVAL).await;
