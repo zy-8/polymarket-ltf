@@ -29,6 +29,7 @@
 当前仓库已经具备：
 
 - Polymarket 活跃市场发现与订单簿订阅
+- Polymarket 账户 `open orders / positions` 本地同步与监控示例
 - Binance `bookTicker` 参考中间价
 - Chainlink RTDS 锚定价格
 - 秒级 snapshot 生成与 CSV 落盘
@@ -92,9 +93,40 @@ Rust:
 
 ```bash
 cargo check
+cargo run
 cargo bench --bench ws_hot_paths
 cargo run --example snapshot_write
 ```
+
+账户相关 example 需要先配置根目录 `.env`，可以从 `.env.example` 复制：
+
+```bash
+cp .env.example .env
+```
+
+其中当前真实使用的是：
+
+- `PRIVATE_KEY`
+  Polymarket CLOB 鉴权私钥
+- `SYMBOLS`
+  默认监控或下单标的，逗号分隔，例如 `btc,eth`
+
+常用 example：
+
+```bash
+cargo run --example book_monitor
+cargo run --example user_monitor
+cargo run --example clob_ok -- btc buy 5 0.55 0.55 gtc 2
+```
+
+说明：
+
+- `cargo run`
+  默认只做 CLOB health check
+- `user_monitor`
+  启动账户 `open orders / positions` bootstrap 和 WS 增量监控
+- `clob_ok`
+  仅用于鉴权、下单与账户状态联调示例，不代表完整执行系统
 
 Python:
 

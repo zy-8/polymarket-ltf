@@ -42,6 +42,12 @@
 - 能抽公共逻辑，就不要复制一份“只改两个字段”的版本
 - 不要每加一个需求就包一层薄封装，让系统逐渐变成补丁堆叠
 - 如果新增抽象无法明显降低重复、降低耦合或提升可测试性，就先不要加
+- 删除不必要的类型转换、中间 struct 和镜像数据模型
+- 能直接使用 SDK/上游返回类型时，不要为了“看起来整齐”再包一层一次性转换对象
+- 需要长期维护的本地状态，如果 SDK 类型已经能表达核心语义，优先直接存 SDK 类型；不要再定义字段几乎一致的镜像 record
+- 如果 REST 快照模型和 WS 增量模型语义不同，优先定义一个本地 canonical 状态类型，让两者都更新这一个类型
+- 配置 struct 只承载配置；不要把运行时状态、bootstrap 数据或临时拼装结果塞进配置对象
+- 如果只有一条真实使用路径，就保留一个直接入口；不要为了“以后可能用到”保留未被使用的备用构造函数或分支入口
 
 ### 2.6 文档与代码同步
 
@@ -57,6 +63,8 @@
   公共模块导出入口
 - `src/errors.rs`
   项目级错误类型
+- `src/config.rs`
+  环境变量与本地 `.env` 加载入口
 - `src/logging.rs`
   日志初始化
 - `src/binance/websocket.rs`
@@ -67,6 +75,8 @@
   Polymarket 订单簿接入与缓存
 - `src/polymarket/rtds_stream.rs`
   Chainlink RTDS 价格接入
+- `src/polymarket/user_stream.rs`
+  用户 open orders / positions 启动同步与 WS 增量维护
 - `src/polymarket/relayer.rs`
   Polymarket Relayer 交易辅助逻辑
 - `src/snapshot.rs`
@@ -75,6 +85,10 @@
   Rust 侧策略目录，适合放运行时策略和执行候选逻辑
 - `src/types/crypto.rs`
   `Symbol` 与 `Interval`
+- `src/polymarket/types/open_orders.rs`
+  本地 open orders 状态模型
+- `src/polymarket/types/positions.rs`
+  本地 positions、成交手续费推导与 bootstrap fee fallback
 - `benches/`
   Rust 热路径性能基准与回归测量
 
@@ -105,6 +119,8 @@
   协作入口
 - `docs/`
   正式项目文档
+- `.env.example`
+  本地账户监控与下单示例的环境变量模板
 - `skills/`
   项目内 skill
 
@@ -183,7 +199,39 @@
 - 是否需要补充或更新对应 benchmark
 - 如果热点路径依赖特定消息形状、fallback 策略或线上观测结论，应在代码旁补充高价值注释，说明为什么这样设计
 
-### 4.5.1 Polymarket `PriceChange` 热路径设计依据
+### 4.5.1 本地订单与持仓监控约束
+
+- `user_stream` 或其他本地持仓监控入口，启动时必须支持 bootstrap 远端仓位快照；否则账户已有仓位时，第一笔卖出成交会直接把本地状态打坏
+- `user_stream` 默认维护全账户 `open orders / positions / trades`；不要为了滚动 market 逻辑把账户状态订阅绑死到单个 market 集合
+- 本地持仓只由“当前账户自己的成交”驱动；轮询或补拉 `trades` 时必须按用户地址过滤，不能直接吃整条 market 的公共成交流
+- 本地 `positions` 的基线来自远端 `positions` bootstrap；运行时仓位增量只由 `TradeMessage` 驱动。taker 直接用顶层 `trade.side`，maker 必须通过 `maker_order.order_id -> 本地 order_context.side` 还原方向
+- 实时成交手续费优先使用成交消息自带的 `fee_rate_bps` 推导；不要再把 crypto 用户监控写成固定 `FeeRule::crypto()` 硬编码落账
+- `positions.market_fees` 只作为 bootstrap 持仓后续成交、或其他缺少 `fee_rate_bps` 的数据源兜底；不要把它重新扩张成实时链路的主手续费来源
+- 本地 `open_orders` 由 `/data/orders` bootstrap、`OrderMessage` 创建/校准，以及本账户 maker `TradeMessage` 的成交增量共同维护；taker trade 不应更新 `open_orders`
+- `open_orders` 语义必须保持为“当前活跃挂单视图”；终态订单不能继续留在 `open_orders`
+- `OrderMessage` 只允许维护挂单和订单上下文，不允许直接更新 `positions`
+- 如果用户成交监控依赖特定消息字段缺失或裁剪行为，应在代码旁补充关键注释说明设计原因；当前 Polymarket SDK 未暴露 `maker_orders.side`，因此 maker 方向必须依赖本地 `order_context`
+- crypto 监控链路优先保持单一 fee 公式与单一 exponent；如果不是明确存在多费率场景，不要提前引入更复杂的 market 级 fee 策略抽象
+- bootstrap 过程优先直接消费远端 `positions` 返回值，不要先复制成只用一次的中间 struct 再写回本地状态
+
+### 4.6 配置与环境变量
+
+- Rust 侧环境变量读取优先统一收敛到 `src/config.rs`
+- `.env` 只作为本地开发辅助，不要把业务配置读取散落到各个 example 或模块里
+- 业务代码应尽量只依赖统一配置接口，而不是直接到处写 `std::env::var(...)`
+- 根目录 `.env.example` 只维护当前真实使用的本地开发变量说明，新增或删除环境变量时必须同步更新
+- 当前默认配置口径：
+  `PRIVATE_KEY` 用于 Polymarket 账户鉴权，`SYMBOLS` 用于本地下单 / 监控示例的默认标的列表
+
+### 4.7 Example 与入口约束
+
+- `src/main.rs` 保持最小健康检查入口，不要把多数据源或账户状态逻辑继续堆进默认入口
+- `examples/book_monitor.rs` 用于 market registry + orderbook 观测，适合验证公开市场数据链路
+- `examples/user_monitor.rs` 用于只读账户状态观测，适合验证 `user_stream` 的 bootstrap 与增量维护
+- `examples/clob_ok.rs` 只应被描述为鉴权、下单和本地账户状态联调示例，不应描述为完整执行系统
+- example 的 CLI 行为、默认参数或环境变量入口变化时，必须同步更新 `README.md` 和相关正式文档
+
+### 4.8 Polymarket `PriceChange` 热路径设计依据
 
 2026-03-20 对根目录真实 WebSocket 样本做了一次结构检查，结论如下：
 

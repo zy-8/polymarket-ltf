@@ -2952,6 +2952,8 @@ dependencies = [
 name = "polymarket-ltf"
 version = "0.1.0"
 dependencies = [
+ "alloy-signer",
+ "alloy-signer-local",
  "anyhow",
  "chrono",
  "criterion",

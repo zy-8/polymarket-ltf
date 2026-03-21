@@ -95,11 +95,7 @@ async fn main() -> Result<()> {
 }
 
 fn format_side(bid: Option<Level>, ask: Option<Level>) -> String {
-    format!(
-        "bid={} ask={}",
-        format_level(bid),
-        format_level(ask)
-    )
+    format!("bid={} ask={}", format_level(bid), format_level(ask))
 }
 
 fn format_level(level: Option<Level>) -> String {

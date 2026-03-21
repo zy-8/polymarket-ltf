@@ -34,6 +34,7 @@
 
 - Polymarket 活跃市场发现
 - Polymarket 订单簿订阅与本地盘口缓存
+- Polymarket 用户 `open orders / positions` 启动同步与增量维护
 - Binance `bookTicker` 参考价
 - Chainlink RTDS 锚定价
 - 秒级 snapshot 生成与落盘
@@ -127,14 +128,18 @@ L0 外部市场与参考源
 
 L1 实时接入层（Rust）
   ├── src/binance/websocket.rs
+  ├── src/config.rs
   ├── src/polymarket/market_registry.rs
   ├── src/polymarket/orderbook_stream.rs
-  └── src/polymarket/rtds_stream.rs
+  ├── src/polymarket/rtds_stream.rs
+  └── src/polymarket/user_stream.rs
 
 L2 状态与特征层（Rust）
   ├── src/snapshot.rs
   ├── src/strategy/
   ├── src/types/crypto.rs
+  ├── src/polymarket/types/open_orders.rs
+  ├── src/polymarket/types/positions.rs
   └── src/polymarket/*
 
 L3 数据边界
@@ -170,6 +175,16 @@ Chainlink RTDS ----------┘
 ```
 
 ```text
+.env / env vars -> src/config.rs -> authenticated CLOB client
+                                      │
+                                      ▼
+                         /data/orders + /data/positions bootstrap
+                                      │
+                                      ▼
+                        user_stream WS incrementals -> local open_orders / positions
+```
+
+```text
 data/snapshots/...csv
         │
         ▼
@@ -195,6 +210,21 @@ CLI 汇总 / 结果文件 / 未来研究报表
   当前 CEX 参考价格接入
 - `src/polymarket/rtds_stream.rs`
   Chainlink RTDS 价格接入
+- `src/config.rs`
+  统一环境变量与本地 `.env` 加载入口
+- `src/polymarket/user_stream.rs`
+  账户级 `open orders / positions` bootstrap 与 WS 增量维护
+- `src/polymarket/types/open_orders.rs`
+  本地活跃挂单 canonical 状态
+- `src/polymarket/types/positions.rs`
+  本地持仓、成交费用推导与 fee fallback 规则
+
+当前用户成交监控口径：
+
+- 持仓增量只由当前账户自己的成交回报驱动
+- maker 方向通过本地 `order_context` 还原，不依赖公共 trade side 猜测
+- 实时手续费优先使用成交消息里的 `fee_rate_bps` 推导
+- bootstrap 或缺少 `fee_rate_bps` 的数据源才回退到本地 market fee 规则
 - `src/snapshot.rs`
   snapshot 特征计算与 CSV 写入
 - `src/polymarket/relayer.rs`
@@ -263,6 +293,7 @@ data/snapshots/<symbol>/<interval>/<market_slug>.csv
 
 - Polymarket 活跃市场发现
 - Polymarket 订单簿订阅与本地盘口缓存
+- Polymarket 账户状态监控示例与本地 `open orders / positions` 维护
 - Binance `bookTicker` 参考中间价
 - Chainlink RTDS 参考价格
 - 秒级 snapshot 生成与落盘
@@ -274,7 +305,7 @@ data/snapshots/<symbol>/<interval>/<market_slug>.csv
 
 - 实盘执行
 - 风控限额
-- 订单状态管理
+- 完整订单生命周期管理
 - 参数扫描平台
 - 统一研究报表中心
 - 多交易所标准化数据层

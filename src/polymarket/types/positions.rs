@@ -11,7 +11,6 @@
 //! 所以这里不拿它直接改持仓。
 //! 本地持仓应当由成交回报驱动：
 //! - `TradeResponse`
-//! - `TradeMessage`
 //! - `data::Trade`
 //!
 //! 官方手续费规则里最重要的两点：
@@ -23,7 +22,6 @@ use polymarket_client_sdk::{
     clob::{
         types::response::TradeResponse,
         types::{Side, TradeStatusType, TraderSide},
-        ws::types::response::{TradeMessage, TradeMessageStatus},
     },
     data::types::{Side as DataSide, response::Trade as DataTrade},
     types::{B256, U256},
@@ -54,6 +52,9 @@ impl Default for FeeRule {
 }
 
 impl FeeRule {
+    pub const CRYPTO_EXPONENT: u32 = 2;
+    pub const SPORTS_EXPONENT: u32 = 1;
+
     pub fn free() -> Self {
         Self {
             fee_rate: Decimal::ZERO,
@@ -64,14 +65,14 @@ impl FeeRule {
     pub fn crypto() -> Self {
         Self {
             fee_rate: Decimal::new(25, 2),
-            exponent: 2,
+            exponent: Self::CRYPTO_EXPONENT,
         }
     }
 
     pub fn sports() -> Self {
         Self {
             fee_rate: Decimal::new(175, 4),
-            exponent: 1,
+            exponent: Self::SPORTS_EXPONENT,
         }
     }
 
@@ -81,6 +82,18 @@ impl FeeRule {
         }
 
         Ok(Self { fee_rate, exponent })
+    }
+
+    pub fn from_bps(fee_rate_bps: Decimal, exponent: u32) -> Result<Self> {
+        if fee_rate_bps.is_sign_negative() {
+            return Err(PolyfillError::validation("fee_rate_bps 不能为负数"));
+        }
+
+        Self::new(fee_rate_bps / Decimal::new(100, 0), exponent)
+    }
+
+    pub fn crypto_from_bps(fee_rate_bps: Decimal) -> Result<Self> {
+        Self::from_bps(fee_rate_bps, Self::CRYPTO_EXPONENT)
     }
 
     pub fn taker_fee_usdc(&self, size: Decimal, price: Decimal) -> Result<Decimal> {
@@ -125,6 +138,7 @@ pub struct Fill {
     pub side: Side,
     pub size: Decimal,
     pub price: Decimal,
+    pub fee_rate_bps: Option<Decimal>,
     pub is_taker: bool,
     pub timestamp: Option<i64>,
     pub outcome: Option<String>,
@@ -153,29 +167,10 @@ impl Fill {
             side: validate_side(trade.side)?,
             size: trade.size,
             price: trade.price,
+            fee_rate_bps: Some(trade.fee_rate_bps),
             is_taker: trader_side_is_taker(trade.trader_side.clone())?,
             timestamp: Some(trade.match_time.timestamp()),
             outcome: Some(trade.outcome.clone()),
-        })
-    }
-
-    pub fn from_trade_message(msg: &TradeMessage) -> Result<Self> {
-        validate_trade_message_status(&msg.status)?;
-
-        Ok(Self {
-            id: format!("trade:{}", msg.id),
-            market_id: msg.market,
-            asset_id: msg.asset_id,
-            side: validate_side(msg.side)?,
-            size: msg.size,
-            price: msg.price,
-            is_taker: trader_side_is_taker(
-                msg.trader_side
-                    .clone()
-                    .ok_or_else(|| PolyfillError::validation("TradeMessage 缺少 trader_side"))?,
-            )?,
-            timestamp: msg.matchtime.or(msg.timestamp).or(msg.last_update),
-            outcome: msg.outcome.clone(),
         })
     }
 
@@ -188,6 +183,7 @@ impl Fill {
             side: side_from_data(trade.side.clone())?,
             size: trade.size,
             price: trade.price,
+            fee_rate_bps: None,
             is_taker,
             timestamp: Some(trade.timestamp),
             outcome: Some(trade.outcome.clone()),
@@ -218,6 +214,28 @@ pub struct Position {
     pub buy_fee_shares: Decimal,
     pub sell_fee_usdc: Decimal,
     pub last_trade_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TradeFees {
+    fee_usdc: Decimal,
+    fee_shares: Decimal,
+}
+
+impl TradeFees {
+    fn from_fill(fill: &Fill, fee_rule: FeeRule) -> Result<Self> {
+        if !fill.is_taker {
+            return Ok(Self {
+                fee_usdc: Decimal::ZERO,
+                fee_shares: Decimal::ZERO,
+            });
+        }
+
+        Ok(Self {
+            fee_usdc: fee_rule.taker_fee_usdc(fill.size, fill.price)?,
+            fee_shares: fee_rule.buy_fee_shares(fill.size, fill.price)?,
+        })
+    }
 }
 
 impl Position {
@@ -264,17 +282,8 @@ impl Position {
     }
 
     fn apply_buy(&mut self, fill: &Fill, fee_rule: FeeRule) -> Result<()> {
-        let fee_usdc = if fill.is_taker {
-            fee_rule.taker_fee_usdc(fill.size, fill.price)?
-        } else {
-            Decimal::ZERO
-        };
-        let fee_shares = if fill.is_taker {
-            fee_rule.buy_fee_shares(fill.size, fill.price)?
-        } else {
-            Decimal::ZERO
-        };
-        let net_size = fill.size - fee_shares;
+        let fees = TradeFees::from_fill(fill, fee_rule)?;
+        let net_size = fill.size - fees.fee_shares;
 
         if net_size.is_sign_negative() {
             return Err(PolyfillError::validation("买单手续费份额超过了成交份额"));
@@ -287,8 +296,8 @@ impl Position {
         } else {
             new_cost / self.size
         };
-        self.buy_fee_usdc += fee_usdc;
-        self.buy_fee_shares += fee_shares;
+        self.buy_fee_usdc += fees.fee_usdc;
+        self.buy_fee_shares += fees.fee_shares;
 
         Ok(())
     }
@@ -301,17 +310,13 @@ impl Position {
             )));
         }
 
-        let fee_usdc = if fill.is_taker {
-            fee_rule.taker_fee_usdc(fill.size, fill.price)?
-        } else {
-            Decimal::ZERO
-        };
+        let fees = TradeFees::from_fill(fill, fee_rule)?;
         let cost_released = self.avg_price * fill.size;
-        let net_proceeds = fill.size * fill.price - fee_usdc;
+        let net_proceeds = fill.size * fill.price - fees.fee_usdc;
 
         self.realized_pnl += net_proceeds - cost_released;
         self.size -= fill.size;
-        self.sell_fee_usdc += fee_usdc;
+        self.sell_fee_usdc += fees.fee_usdc;
 
         if self.size.is_zero() {
             self.avg_price = Decimal::ZERO;
@@ -343,6 +348,10 @@ impl Positions {
         self.market_fees.insert(market_id, fee_rule);
     }
 
+    pub fn ensure_market_fee(&mut self, market_id: B256, fee_rule: FeeRule) {
+        self.market_fees.entry(market_id).or_insert(fee_rule);
+    }
+
     pub fn get(&self, asset_id: &U256) -> Option<&Position> {
         self.positions.get(asset_id)
     }
@@ -365,16 +374,19 @@ impl Positions {
             return Ok(());
         }
 
-        let fee_rule = self
-            .market_fees
-            .get(&fill.market_id)
-            .copied()
-            .ok_or_else(|| {
-                PolyfillError::validation(format!(
-                    "market {} 尚未注册手续费规则，请先调用 register_market_fee",
-                    fill.market_id
-                ))
-            })?;
+        let fee_rule = match fill.fee_rate_bps {
+            Some(fee_rate_bps) => FeeRule::crypto_from_bps(fee_rate_bps)?,
+            None => self
+                .market_fees
+                .get(&fill.market_id)
+                .copied()
+                .ok_or_else(|| {
+                    PolyfillError::validation(format!(
+                        "market {} 尚未注册手续费规则，且 fill 未提供 fee_rate_bps",
+                        fill.market_id
+                    ))
+                })?,
+        };
 
         let position = self
             .positions
@@ -386,12 +398,44 @@ impl Positions {
         Ok(())
     }
 
-    pub fn apply_trade_response(&mut self, trade: &TradeResponse) -> Result<()> {
-        self.apply_fill(Fill::from_trade_response(trade)?)
+    pub fn bootstrap_position(
+        &mut self,
+        market_id: B256,
+        asset_id: U256,
+        outcome: Option<String>,
+        size: Decimal,
+        avg_price: Decimal,
+        realized_pnl: Decimal,
+        fee_rule: FeeRule,
+    ) -> Result<()> {
+        if size <= Decimal::ZERO {
+            return Err(PolyfillError::validation(
+                "bootstrap position.size 必须大于 0",
+            ));
+        }
+
+        validate_price(avg_price)?;
+        self.register_market_fee(market_id, fee_rule);
+        self.positions.insert(
+            asset_id,
+            Position {
+                market_id,
+                asset_id,
+                outcome,
+                size,
+                avg_price,
+                realized_pnl,
+                buy_fee_usdc: Decimal::ZERO,
+                buy_fee_shares: Decimal::ZERO,
+                sell_fee_usdc: Decimal::ZERO,
+                last_trade_ts: None,
+            },
+        );
+        Ok(())
     }
 
-    pub fn apply_trade_message(&mut self, msg: &TradeMessage) -> Result<()> {
-        self.apply_fill(Fill::from_trade_message(msg)?)
+    pub fn apply_trade_response(&mut self, trade: &TradeResponse) -> Result<()> {
+        self.apply_fill(Fill::from_trade_response(trade)?)
     }
 
     pub fn apply_data_trade(&mut self, trade: &DataTrade, is_taker: bool) -> Result<()> {
@@ -408,11 +452,16 @@ fn synthetic_data_trade_id(trade: &DataTrade) -> String {
 
 fn maybe_update_outcome(slot: &mut Option<String>, outcome: Option<&str>) {
     if slot.is_none() {
-        if let Some(outcome) = outcome {
-            if !outcome.trim().is_empty() {
-                *slot = Some(outcome.to_string());
-            }
-        }
+        *slot = normalize_outcome(outcome);
+    }
+}
+
+fn normalize_outcome(outcome: Option<&str>) -> Option<String> {
+    let outcome = outcome?.trim();
+    if outcome.is_empty() {
+        None
+    } else {
+        Some(outcome.to_string())
     }
 }
 
@@ -456,20 +505,6 @@ fn validate_trade_status(status: &TradeStatusType) -> Result<()> {
         ))),
         _ => Err(PolyfillError::validation(
             "不支持使用未知 TradeStatusType 更新持仓",
-        )),
-    }
-}
-
-fn validate_trade_message_status(status: &TradeMessageStatus) -> Result<()> {
-    match status {
-        TradeMessageStatus::Matched | TradeMessageStatus::Mined | TradeMessageStatus::Confirmed => {
-            Ok(())
-        }
-        TradeMessageStatus::Unknown(raw) => Err(PolyfillError::validation(format!(
-            "未知 TradeMessage status: {raw}"
-        ))),
-        _ => Err(PolyfillError::validation(
-            "不支持使用未知 TradeMessageStatus 更新持仓",
         )),
     }
 }
@@ -542,6 +577,7 @@ mod tests {
             side,
             size,
             price,
+            fee_rate_bps: None,
             is_taker,
             timestamp: Some(1),
             outcome: Some("Yes".to_string()),
@@ -550,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_taker_buy_fee_is_collected_in_shares() {
-        let rule = FeeRule::crypto();
+        let rule = FeeRule::crypto_from_bps(Decimal::new(25, 0)).expect("bps should be valid");
         let fee_usdc = rule
             .taker_fee_usdc(Decimal::new(100, 0), Decimal::new(5, 1))
             .expect("fee should be calculated");
@@ -684,6 +720,31 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_fill_uses_fee_rate_bps_from_fill_without_market_registration() {
+        let market_id = market(7);
+        let asset_id = asset(7);
+        let mut positions = Positions::new();
+        let mut taker_fill = fill(
+            "trade-1",
+            market_id,
+            asset_id,
+            Side::Buy,
+            Decimal::new(100, 0),
+            Decimal::new(5, 1),
+            true,
+        );
+        taker_fill.fee_rate_bps = Some(Decimal::new(25, 0));
+
+        positions
+            .apply_fill(taker_fill)
+            .expect("fill with fee_rate_bps should work");
+
+        let position = positions.get(&asset_id).expect("position should exist");
+        assert_eq!(position.buy_fee_usdc, Decimal::new(7813, 4));
+        assert_eq!(position.buy_fee_shares, Decimal::new(15626, 4));
+    }
+
+    #[test]
     fn test_unregistered_market_is_rejected() {
         let mut positions = Positions::new();
 
@@ -701,7 +762,43 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("尚未注册手续费规则，请先调用 register_market_fee")
+                .contains("尚未注册手续费规则，且 fill 未提供 fee_rate_bps")
         );
+    }
+
+    #[test]
+    fn test_bootstrap_position_allows_followup_sell() {
+        let market_id = market(6);
+        let asset_id = asset(6);
+        let mut positions = Positions::new();
+
+        positions
+            .bootstrap_position(
+                market_id,
+                asset_id,
+                Some("Yes".to_string()),
+                Decimal::new(10, 0),
+                Decimal::new(4, 1),
+                Decimal::new(12, 1),
+                FeeRule::free(),
+            )
+            .expect("bootstrap should work");
+
+        positions
+            .apply_fill(fill(
+                "trade-2",
+                market_id,
+                asset_id,
+                Side::Sell,
+                Decimal::new(4, 0),
+                Decimal::new(6, 1),
+                false,
+            ))
+            .expect("sell after bootstrap should work");
+
+        let position = positions.get(&asset_id).expect("position should exist");
+        assert_eq!(position.size, Decimal::new(6, 0));
+        assert_eq!(position.avg_price, Decimal::new(4, 1));
+        assert_eq!(position.realized_pnl, Decimal::new(20, 1));
     }
 }

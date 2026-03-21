@@ -61,6 +61,10 @@ backtest/
 - 卖 `down`：`down_bid_price`
 - `up` 估值：`up_mid_price`
 - `down` 估值：`down_mid_price`
+- 成交默认按 taker 口径记账
+- `--fee-bps` 表示 Polymarket fee rate，不再按 `gross * bps` 简化
+- 买单手续费先按 Polymarket crypto fee 公式算成 `USDC`，再折成 shares 扣减持仓
+- 卖单手续费按同一公式直接从 `USDC` 收益中扣减
 
 当前基线策略是 `z_score` 均值回归：
 

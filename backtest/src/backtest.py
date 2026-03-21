@@ -44,7 +44,11 @@ def add_execution_args(
     include_scan_args: bool = False,
 ) -> None:
     parser.add_argument("--starting-cash", default="1000", help="Initial cash balance")
-    parser.add_argument("--fee-bps", default="0", help="Transaction fee in bps")
+    parser.add_argument(
+        "--fee-bps",
+        default="0",
+        help="Polymarket fee rate in bps, applied with the taker fee formula",
+    )
     add_strategy_arg(parser)
     add_strategy_parameter_args(parser, include_scan_args=include_scan_args)
 

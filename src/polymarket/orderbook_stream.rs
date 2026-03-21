@@ -21,7 +21,7 @@
 
 use crate::errors::{PolyfillError, Result};
 use crate::polymarket::types::orderbook::{BinaryOrderBook, Level, OrderBooks};
-use futures::{StreamExt, stream::select};
+use futures::StreamExt;
 use polymarket_client_sdk::clob::ws::{BookUpdate, Client as WsClient, PriceChange};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
@@ -29,12 +29,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
-const RECONNECT_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-const RECONNECT_MULTIPLIER: u32 = 2;
 const COMMAND_BUFFER: usize = 64;
 
 /// Polymarket 订单簿订阅客户端。
@@ -42,7 +38,9 @@ const COMMAND_BUFFER: usize = 64;
 /// `connect()` 之后会启动一个后台任务：
 /// - 等待外部通过 `subscribe()` 动态订阅
 /// - 收到新快照后直接替换本地簿
-/// - 如果流异常结束，则按固定退避自动重建订阅
+/// - 市场集合变化时重建本地过滤流
+///
+/// SDK 已经负责市场 WS 的自动重连和自动重订阅，这里只维护本地订阅集合。
 pub struct Client {
     books: Arc<RwLock<OrderBooks>>,
     tx: mpsc::Sender<Command>,
@@ -150,17 +148,37 @@ async fn run_subscription_loop(
     books: Arc<RwLock<OrderBooks>>,
     mut commands: mpsc::Receiver<Command>,
 ) {
+    // 这里不再手写外层 reconnect loop。
+    // SDK 会自动重连 market channel，并按已跟踪的 asset 集合自动重订阅；
+    // 本层只在 subscribe/unsubscribe 改变过滤集合时重建本地 stream 视图。
+    let client = WsClient::default();
     let mut desired_asset_ids = HashSet::new();
-    let mut delay = RECONNECT_BASE_DELAY;
+    let mut current_asset_ids = Vec::new();
+    let mut book_stream = None;
+    let mut price_stream = None;
 
     loop {
-        if desired_asset_ids.is_empty() {
+        if current_asset_ids.is_empty() {
             match commands.recv().await {
                 Some(command) => match apply_command(command, &books, &mut desired_asset_ids) {
                     Ok(ControlFlow::Continue) => continue,
                     Ok(ControlFlow::Rebuild) => {
-                        delay = RECONNECT_BASE_DELAY;
-                        continue;
+                        match rebuild_streams(
+                            &client,
+                            &mut current_asset_ids,
+                            &mut desired_asset_ids,
+                            &mut book_stream,
+                            &mut price_stream,
+                        ) {
+                            Ok(()) => continue,
+                            Err(error) => {
+                                warn!("重建 Polymarket 订单簿订阅失败: {}", error);
+                                current_asset_ids.clear();
+                                book_stream = None;
+                                price_stream = None;
+                                continue;
+                            }
+                        }
                     }
                     Ok(ControlFlow::Shutdown) | Err(_) => break,
                 },
@@ -168,86 +186,141 @@ async fn run_subscription_loop(
             }
         }
 
-        let current_asset_ids = desired_asset_ids.iter().copied().collect::<Vec<_>>();
-        let client = WsClient::default();
-
-        match (
-            client.subscribe_orderbook(current_asset_ids.clone()),
-            client.subscribe_prices(current_asset_ids.clone()),
-        ) {
-            (Ok(book_stream), Ok(price_stream)) => {
-                info!(
-                    "Polymarket 订单簿与 PriceChange 订阅已建立: asset_ids={}",
-                    current_asset_ids.len()
-                );
-                delay = RECONNECT_BASE_DELAY;
-
-                let book_stream = book_stream.map(|message| message.map(StreamEvent::Book));
-                let price_stream =
-                    price_stream.map(|message| message.map(StreamEvent::PriceChange));
-                let mut stream = Box::pin(select(book_stream, price_stream));
-                let mut should_rebuild = false;
-
-                loop {
-                    tokio::select! {
-                        biased;
-                        command = commands.recv() => {
-                            match command {
-                                Some(command) => {
-                                    match apply_command(command, &books, &mut desired_asset_ids) {
-                                        Ok(ControlFlow::Continue) => {}
-                                        Ok(ControlFlow::Rebuild) => {
-                                            unsubscribe_all(&client, &current_asset_ids);
-                                            should_rebuild = true;
-                                            break;
-                                        }
-                                        Ok(ControlFlow::Shutdown) | Err(_) => {
-                                            unsubscribe_all(&client, &current_asset_ids);
-                                            return;
-                                        }
-                                    }
-                                }
-                                None => {
-                                    unsubscribe_all(&client, &current_asset_ids);
-                                    return;
+        tokio::select! {
+            biased;
+            command = commands.recv() => {
+                match command {
+                    Some(command) => {
+                        match apply_command(command, &books, &mut desired_asset_ids) {
+                            Ok(ControlFlow::Continue) => {}
+                            Ok(ControlFlow::Rebuild) => {
+                                if let Err(error) = rebuild_streams(
+                                    &client,
+                                    &mut current_asset_ids,
+                                    &mut desired_asset_ids,
+                                    &mut book_stream,
+                                    &mut price_stream,
+                                ) {
+                                    warn!("重建 Polymarket 订单簿订阅失败: {}", error);
+                                    current_asset_ids.clear();
+                                    book_stream = None;
+                                    price_stream = None;
                                 }
                             }
-                        }
-                        message = stream.next() => match message {
-                            Some(Ok(StreamEvent::Book(update))) => {
-                                if let Err(error) = apply_book_update(&books, update) {
-                                    warn!("应用 Polymarket BookUpdate 失败: {}", error);
-                                }
+                            Ok(ControlFlow::Shutdown) | Err(_) => {
+                                unsubscribe_all(&client, &current_asset_ids);
+                                return;
                             }
-                            Some(Ok(StreamEvent::PriceChange(change))) => {
-                                if let Err(error) = apply_price_change(&books, change) {
-                                    warn!("应用 Polymarket PriceChange 失败: {}", error);
-                                }
-                            }
-                            Some(Err(error)) => {
-                                warn!("Polymarket 市场流错误: {}", error);
-                            }
-                            None => break,
                         }
                     }
+                    None => {
+                        unsubscribe_all(&client, &current_asset_ids);
+                        return;
+                    }
                 }
-
-                if should_rebuild {
-                    continue;
+            },
+            message = next_book_message(&mut book_stream), if book_stream.is_some() => match message {
+                Some(Ok(update)) => {
+                    if let Err(error) = apply_book_update(&books, update) {
+                        warn!("应用 Polymarket BookUpdate 失败: {}", error);
+                    }
                 }
-
-                warn!("Polymarket 市场流已结束，准备重建订阅");
-            }
-            (Err(error), _) => {
-                warn!("创建 Polymarket 订单簿订阅失败: {}", error);
-            }
-            (_, Err(error)) => {
-                warn!("创建 Polymarket PriceChange 订阅失败: {}", error);
-            }
+                Some(Err(error)) => {
+                    warn!("Polymarket 订单簿流错误: {}", error);
+                }
+                None => {
+                    warn!("Polymarket 订单簿流已结束");
+                    book_stream = None;
+                }
+            },
+            message = next_price_message(&mut price_stream), if price_stream.is_some() => match message {
+                Some(Ok(change)) => {
+                    if let Err(error) = apply_price_change(&books, change) {
+                        warn!("应用 Polymarket PriceChange 失败: {}", error);
+                    }
+                }
+                Some(Err(error)) => {
+                    warn!("Polymarket PriceChange 流错误: {}", error);
+                }
+                None => {
+                    warn!("Polymarket PriceChange 流已结束");
+                    price_stream = None;
+                }
+            },
         }
+    }
+}
 
-        sleep(delay).await;
-        delay = next_reconnect_delay(delay);
+fn rebuild_streams(
+    client: &WsClient,
+    current_asset_ids: &mut Vec<U256>,
+    desired_asset_ids: &mut HashSet<U256>,
+    book_stream: &mut Option<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<BookUpdate>> + Send>,
+        >,
+    >,
+    price_stream: &mut Option<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<PriceChange>> + Send>,
+        >,
+    >,
+) -> Result<()> {
+    unsubscribe_all(client, current_asset_ids);
+    *current_asset_ids = desired_asset_ids.iter().copied().collect();
+
+    if current_asset_ids.is_empty() {
+        *book_stream = None;
+        *price_stream = None;
+        return Ok(());
+    }
+
+    let next_book_stream = client
+        .subscribe_orderbook(current_asset_ids.clone())
+        .map_err(|error| {
+            PolyfillError::internal_simple(format!("创建 Polymarket 订单簿订阅失败: {error}"))
+        })?
+        .boxed();
+    let next_price_stream = client
+        .subscribe_prices(current_asset_ids.clone())
+        .map_err(|error| {
+            PolyfillError::internal_simple(format!("创建 Polymarket PriceChange 订阅失败: {error}"))
+        })?
+        .boxed();
+
+    info!(
+        "Polymarket 订单簿与 PriceChange 订阅已建立: asset_ids={}",
+        current_asset_ids.len()
+    );
+
+    *book_stream = Some(next_book_stream);
+    *price_stream = Some(next_price_stream);
+    Ok(())
+}
+
+async fn next_book_message(
+    stream: &mut Option<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<BookUpdate>> + Send>,
+        >,
+    >,
+) -> Option<polymarket_client_sdk::Result<BookUpdate>> {
+    match stream.as_mut() {
+        Some(stream) => stream.next().await,
+        None => None,
+    }
+}
+
+async fn next_price_message(
+    stream: &mut Option<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<PriceChange>> + Send>,
+        >,
+    >,
+) -> Option<polymarket_client_sdk::Result<PriceChange>> {
+    match stream.as_mut() {
+        Some(stream) => stream.next().await,
+        None => None,
     }
 }
 
@@ -370,20 +443,6 @@ fn build_books(markets: Vec<[U256; 2]>) -> Result<(Arc<RwLock<OrderBooks>>, Vec<
     }
 
     Ok((Arc::new(RwLock::new(orderbooks)), asset_ids))
-}
-
-fn next_reconnect_delay(current_delay: std::time::Duration) -> std::time::Duration {
-    let next_millis = current_delay
-        .as_millis()
-        .saturating_mul(RECONNECT_MULTIPLIER as u128)
-        .min(RECONNECT_MAX_DELAY.as_millis());
-
-    std::time::Duration::from_millis(next_millis as u64)
-}
-
-enum StreamEvent {
-    Book(BookUpdate),
-    PriceChange(PriceChange),
 }
 
 enum Command {

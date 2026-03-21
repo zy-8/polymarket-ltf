@@ -261,6 +261,63 @@ class BacktestTests(unittest.TestCase):
         )
         self.assertEqual("down", down_signal.target_side)
 
+    def test_polymarket_fee_model_matches_taker_buy_and_sell_accounting(self) -> None:
+        row = SnapshotRow(
+            timestamp=datetime(2026, 3, 20, 10, 0, 0),
+            binance_mid_price=Decimal("0"),
+            chainlink_price=Decimal("0"),
+            spread_binance_chainlink=Decimal("0"),
+            spread_delta=Decimal("0"),
+            chainlink_start_delta=Decimal("0"),
+            up_bid_price=Decimal("0.60"),
+            up_bid_size=Decimal("100"),
+            up_ask_price=Decimal("0.50"),
+            up_ask_size=Decimal("100"),
+            down_bid_price=Decimal("0.40"),
+            down_bid_size=Decimal("100"),
+            down_ask_price=Decimal("0.50"),
+            down_ask_size=Decimal("100"),
+            z_score=Decimal("0"),
+            vel_spread=Decimal("0"),
+            up_mid_price_slope=Decimal("0"),
+            binance_sigma=Decimal("0"),
+            chainlink_change_30s_pct=Decimal("0"),
+            chainlink_change_60s_pct=Decimal("0"),
+            chainlink_run=0,
+        )
+        engine = BacktestEngine(
+            BacktestConfig(
+                starting_cash=Decimal("100"),
+                fee_bps=Decimal("25"),
+                max_position=Decimal("10"),
+            )
+        )
+        trades = []
+        cash = Decimal("100")
+        position = Position(up_quantity=Decimal("0"), down_quantity=Decimal("0"))
+
+        cash, position = engine._buy_up(
+            row=row,
+            cash=cash,
+            position=position,
+            quantity=Decimal("10"),
+            trades=trades,
+        )
+        self.assertEqual(Decimal("95.0000"), cash)
+        self.assertEqual(Decimal("9.8438"), position.up_quantity)
+        self.assertEqual(Decimal("0.0781"), trades[-1].fee)
+
+        cash, position = engine._sell_up(
+            row=row,
+            cash=cash,
+            position=position,
+            quantity=position.up_quantity,
+            trades=trades,
+        )
+        self.assertEqual(Decimal("100.82118"), cash)
+        self.assertEqual(Decimal("0.0000"), position.up_quantity)
+        self.assertEqual(Decimal("0.0851"), trades[-1].fee)
+
     def test_scan_outputs_use_pandas_dataframe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             csv_path = Path(tmp_dir) / "sample.csv"

@@ -14,7 +14,7 @@ class BacktestConfig:
     """回测配置。
 
     `starting_cash`：初始现金。
-    `fee_bps`：单边手续费，单位为基点。
+    `fee_bps`：Polymarket fee rate，单位为基点。
     `max_position`：允许持有的最大绝对仓位。
     """
 
@@ -32,7 +32,13 @@ class BacktestEngine:
     - `down` 买入使用 `down_ask_price`，卖出使用 `down_bid_price`
     - 持仓估值使用 `up_mid_price` / `down_mid_price`
     - 策略给出的是“目标腿 + 目标数量”，不是直接买卖动作
+    - 回测成交默认按 taker 口径记账
+    - 买单手续费按 Polymarket 公式先算成 USDC，再折成 shares 扣减持仓
+    - 卖单手续费按 Polymarket 公式直接从 USDC 收益中扣减
     """
+
+    FEE_SCALE = Decimal("0.0001")
+    CRYPTO_EXPONENT = 2
 
     def __init__(self, config: BacktestConfig) -> None:
         self.config = config
@@ -138,10 +144,11 @@ class BacktestEngine:
             return cash, position
 
         gross = row.up_ask_price * quantity
-        fee = self._fee(gross)
-        next_cash = cash - gross - fee
+        fee = self._buy_fee(quantity, row.up_ask_price)
+        net_quantity = quantity - fee.fee_shares
+        next_cash = cash - gross
         next_position = Position(
-            up_quantity=position.up_quantity + quantity,
+            up_quantity=position.up_quantity + net_quantity,
             down_quantity=position.down_quantity,
         )
         trades.append(
@@ -149,9 +156,9 @@ class BacktestEngine:
                 timestamp=row.timestamp,
                 side="buy",
                 asset="up",
-                quantity=quantity,
+                quantity=net_quantity,
                 price=row.up_ask_price,
-                fee=fee,
+                fee=fee.fee_usdc,
                 up_position_after=next_position.up_quantity,
                 down_position_after=next_position.down_quantity,
                 cash_after=next_cash,
@@ -173,8 +180,8 @@ class BacktestEngine:
             return cash, position
 
         gross = row.up_bid_price * quantity
-        fee = self._fee(gross)
-        next_cash = cash + gross - fee
+        fee = self._sell_fee(quantity, row.up_bid_price)
+        next_cash = cash + gross - fee.fee_usdc
         next_position = Position(
             up_quantity=position.up_quantity - quantity,
             down_quantity=position.down_quantity,
@@ -186,7 +193,7 @@ class BacktestEngine:
                 asset="up",
                 quantity=quantity,
                 price=row.up_bid_price,
-                fee=fee,
+                fee=fee.fee_usdc,
                 up_position_after=next_position.up_quantity,
                 down_position_after=next_position.down_quantity,
                 cash_after=next_cash,
@@ -208,20 +215,21 @@ class BacktestEngine:
             return cash, position
 
         gross = row.down_ask_price * quantity
-        fee = self._fee(gross)
-        next_cash = cash - gross - fee
+        fee = self._buy_fee(quantity, row.down_ask_price)
+        net_quantity = quantity - fee.fee_shares
+        next_cash = cash - gross
         next_position = Position(
             up_quantity=position.up_quantity,
-            down_quantity=position.down_quantity + quantity,
+            down_quantity=position.down_quantity + net_quantity,
         )
         trades.append(
             Trade(
                 timestamp=row.timestamp,
                 side="buy",
                 asset="down",
-                quantity=quantity,
+                quantity=net_quantity,
                 price=row.down_ask_price,
-                fee=fee,
+                fee=fee.fee_usdc,
                 up_position_after=next_position.up_quantity,
                 down_position_after=next_position.down_quantity,
                 cash_after=next_cash,
@@ -243,8 +251,8 @@ class BacktestEngine:
             return cash, position
 
         gross = row.down_bid_price * quantity
-        fee = self._fee(gross)
-        next_cash = cash + gross - fee
+        fee = self._sell_fee(quantity, row.down_bid_price)
+        next_cash = cash + gross - fee.fee_usdc
         next_position = Position(
             up_quantity=position.up_quantity,
             down_quantity=position.down_quantity - quantity,
@@ -256,7 +264,7 @@ class BacktestEngine:
                 asset="down",
                 quantity=quantity,
                 price=row.down_bid_price,
-                fee=fee,
+                fee=fee.fee_usdc,
                 up_position_after=next_position.up_quantity,
                 down_position_after=next_position.down_quantity,
                 cash_after=next_cash,
@@ -264,12 +272,34 @@ class BacktestEngine:
         )
         return next_cash, next_position
 
-    def _fee(self, gross_notional: Decimal) -> Decimal:
-        """根据成交额计算单边手续费。"""
+    @dataclass(frozen=True)
+    class _TradeFee:
+        fee_usdc: Decimal
+        fee_shares: Decimal
 
-        return (gross_notional * self.config.fee_bps / Decimal("10000")).quantize(
-            Decimal("0.0000001")
+    def _buy_fee(self, quantity: Decimal, price: Decimal) -> _TradeFee:
+        fee_usdc = self._taker_fee_usdc(quantity, price)
+        fee_shares = Decimal("0")
+        if fee_usdc > 0 and price > 0:
+            fee_shares = (fee_usdc / price).quantize(self.FEE_SCALE)
+        return self._TradeFee(fee_usdc=fee_usdc, fee_shares=fee_shares)
+
+    def _sell_fee(self, quantity: Decimal, price: Decimal) -> _TradeFee:
+        return self._TradeFee(
+            fee_usdc=self._taker_fee_usdc(quantity, price),
+            fee_shares=Decimal("0"),
         )
+
+    def _taker_fee_usdc(self, quantity: Decimal, price: Decimal) -> Decimal:
+        """按 Polymarket crypto fee 公式计算 taker fee。"""
+
+        if quantity <= 0 or price <= 0 or self.config.fee_bps <= 0:
+            return Decimal("0")
+
+        fee_rate = self.config.fee_bps / Decimal("100")
+        factor = price * (Decimal("1") - price)
+        fee = quantity * price * fee_rate * (factor**self.CRYPTO_EXPONENT)
+        return fee.quantize(self.FEE_SCALE)
 
     def _max_drawdown_pct(self, equity_curve: list[EquityPoint]) -> Decimal:
         """计算权益曲线的最大回撤百分比。"""
