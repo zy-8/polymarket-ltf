@@ -22,7 +22,7 @@ const INDEX_HTML: &str = include_str!("../../dashboard/index.html");
 const APP_JS: &str = include_str!("../../dashboard/app.js");
 const STYLES_CSS: &str = include_str!("../../dashboard/styles.css");
 
-pub const DEFAULT_ADDR: &str = "127.0.0.1:3000";
+pub const DEFAULT_ADDR: &str = "0.0.0.0:3000";
 
 pub async fn spawn(handle: Handle) -> anyhow::Result<()> {
     let addr: SocketAddr = DEFAULT_ADDR.parse()?;
