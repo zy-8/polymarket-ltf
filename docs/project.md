@@ -36,9 +36,11 @@
 - Polymarket 订单簿订阅与本地盘口缓存
 - Polymarket 用户 `open orders / positions` 启动同步与增量维护
 - Binance `bookTicker` 参考价
+- Binance `kline` 运行时 candle 输入
 - Chainlink RTDS 锚定价
 - 秒级 snapshot 生成与落盘
 - Python 离线回测与分组评估
+- `src/main.rs` 统一主程序入口下的 runtime 启动
 
 当前支持的研究维度包括：
 
@@ -207,13 +209,21 @@ CLI 汇总 / 结果文件 / 未来研究报表
 - `src/polymarket/orderbook_stream.rs`
   Polymarket 订单簿接入与本地盘口缓存
 - `src/binance/websocket.rs`
-  当前 CEX 参考价格接入
+  Binance 接入，统一维护 `bookTicker`、`kline`、启动期 HTTP 历史回填、本地缓存与动态订阅
 - `src/polymarket/rtds_stream.rs`
   Chainlink RTDS 价格接入
 - `src/config.rs`
   统一环境变量与本地 `.env` 加载入口
+- `src/events.rs`
+  仓库级事件模型，统一承载 `orders / trades / strategy attribution` 的业务语义
+- `src/storage/sqlite.rs`
+  订单事件、成交事件和策略归因的本地 SQLite 持久化，以及 dashboard 最小历史读取
+- `src/strategy/crypto_reversal/service.rs`
+  `crypto_reversal` 候选评估、下一期 market 选择和背景周期过滤入口
+- `src/strategy/crypto_reversal/execute.rs`
+  `crypto_reversal` 最小提交入口、HTTP 盘口定价与固定资金 sizing
 - `src/polymarket/user_stream.rs`
-  账户级 `open orders / positions` bootstrap 与 WS 增量维护
+  账户级 `open orders / positions` bootstrap、WS 增量维护，以及可选的 `orders / trades` 持久化；不承担策略归因上下文
 - `src/polymarket/types/open_orders.rs`
   本地活跃挂单 canonical 状态
 - `src/polymarket/types/positions.rs`

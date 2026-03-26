@@ -258,7 +258,6 @@ logs/
 
 - `run_id`
 - `strategy_name`
-- `strategy_version`
 - `dataset_path` 或 `dataset_id`
 - `symbol`
 - `interval`
@@ -286,8 +285,6 @@ logs/
 未来进入执行层后，至少应具备：
 
 - `run_id`
-- `signal_id`
-- `strategy_version`
 - `venue`
 - `symbol`
 - `market_slug`

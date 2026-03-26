@@ -50,6 +50,8 @@ backtest/
   `report.json` 再渲染入口
 - `tests/`
   单元测试与最小示例数据
+- `freqtrade/`
+  Freqtrade 实验子项目，用于 `crypto_reversal` 的 Binance K 线信号研究
 
 ## 当前回测模型
 
@@ -83,7 +85,7 @@ backtest/
 - `scan`
   跑参数扫描
 - `report`
-  基于已有 `report.json` 生成 HTML / quantstats 报表
+  基于已有 `report.json` 重新生成报表；只有显式传 `--html-report` 或 `--quantstats-report` 时才会写对应输出
 
 当前默认入口参数：
 
@@ -122,6 +124,20 @@ report --report-json ../data/backtests/demo/report.json --html-report
 - 多文件回测结果 DataFrame 化
 - HTML 报表中的扫描表展示
 - 后续更大样本的分组研究
+
+## Freqtrade 实验目录
+
+仓库当前保留一个独立的 Freqtrade 实验目录：
+
+- [`freqtrade/README.md`](./freqtrade/README.md)
+
+这个目录用于复刻 `src/strategy/crypto_reversal/model.rs` 的 K 线信号研究层，
+方便做 Freqtrade 风格的 backtesting 和 hyperopt。
+
+需要注意：
+
+- `freqtrade/` 不是当前正式的 Polymarket 回测入口
+- 正式 snapshot 回测、结构化结果和研究输出仍然以 `src/` 下自定义引擎为准
 
 ## 结构化输出
 

@@ -5,19 +5,21 @@
 //! - SAFE EIP-712 签名；
 //! - Relayer 提交、查询与确认轮询。
 
-use crate::commands::data::DataService;
-use alloy::primitives::{address, keccak256, Address, Bytes, FixedBytes, U256};
-use alloy::sol;
-use alloy::sol_types::{eip712_domain, SolCall, SolStruct};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256, address, keccak256};
+use alloy_signer::Signer;
+use alloy_sol_types::{SolCall, SolStruct, eip712_domain, sol};
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use hmac::{Hmac, Mac};
 use polymarket_client_sdk::auth::Credentials;
 use polymarket_client_sdk::auth::ExposeSecret as _;
-use polymarket_client_sdk::{contract_config, derive_safe_wallet, POLYGON};
+use polymarket_client_sdk::data::types::request::PositionsRequest;
+use polymarket_client_sdk::{POLYGON, contract_config};
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+
+use crate::strategy::StrategyContext;
 
 const DEFAULT_RELAYER_URL: &str = "https://relayer-v2.polymarket.com";
 const DEFAULT_CHAIN_ID: u64 = POLYGON;
@@ -223,25 +225,28 @@ struct RelayPayloadResponse {
 /// - Builder API 凭据（用于签名头）；
 /// - 钱包签名器（用于 SAFE Tx 签名）；
 /// - HTTP 客户端与轮询配置。
-pub struct RelayerService<S: alloy::signers::Signer + Send + Sync> {
+pub struct RelayerService {
     config: RelayerConfig,
-    credentials: Credentials,
+    context: StrategyContext,
     http: reqwest::Client,
-    signer_address: Address,
-    signer: S,
 }
 
-impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
+impl RelayerService {
     /// 使用默认配置创建服务。
-    pub fn new(credentials: Credentials, signer: S) -> Self {
-        let signer_address = signer.address();
+    pub fn new(context: StrategyContext) -> Self {
         Self {
             config: RelayerConfig::default(),
-            credentials,
+            context,
             http: reqwest::Client::new(),
-            signer_address,
-            signer,
         }
+    }
+
+    fn signer_address(&self) -> Address {
+        self.context.signer.address()
+    }
+
+    fn credentials(&self) -> Credentials {
+        self.context.credentials.clone()
     }
 
     fn build_url(&self, path: &str) -> String {
@@ -250,7 +255,7 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = self.build_url(path);
-        let headers = create_relayer_headers(&self.credentials, "GET", path, "")?;
+        let headers = create_relayer_headers(&self.credentials(), "GET", path, "")?;
         let response = self.http.get(url).headers(headers).send().await?;
         self.handle_response(response).await
     }
@@ -262,7 +267,7 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
     {
         let url = self.build_url(path);
         let body_json = serde_json::to_string(body)?;
-        let headers = create_relayer_headers(&self.credentials, "POST", path, &body_json)?;
+        let headers = create_relayer_headers(&self.credentials(), "POST", path, &body_json)?;
         let response = self
             .http
             .post(url)
@@ -290,7 +295,7 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
         let path = format!(
             "{}?address={}&type=SAFE",
             endpoints::RELAY_PAYLOAD,
-            self.signer_address
+            self.signer_address()
         );
         self.get(&path).await
     }
@@ -305,8 +310,6 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
         metadata: impl Into<String>,
     ) -> Result<RelayerTransaction> {
         anyhow::ensure!(!calls.is_empty(), "calls 不能为空");
-        let safe = derive_safe_wallet(self.signer_address, self.config.chain_id)
-            .context("无法推导 SAFE 地址，请检查 chain_id 与 signer 地址")?;
         let payload = self.relay_payload().await?;
         let nonce: u64 = payload
             .nonce
@@ -321,9 +324,9 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
         };
 
         let signature = sign_safe_tx(
-            &self.signer,
+            &self.context.signer,
             &SafeTxParams {
-                safe,
+                safe: self.context.safe_address,
                 to,
                 value: U256::ZERO,
                 data: data.clone(),
@@ -336,9 +339,9 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
         .await?;
 
         let request = SafeSubmitRequest {
-            from: self.signer_address,
+            from: self.signer_address(),
             to,
-            proxy_wallet: safe,
+            proxy_wallet: self.context.safe_address,
             data,
             nonce: nonce.to_string(),
             signature,
@@ -358,16 +361,14 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
                 amount,
             } => {
                 let call = split_position(condition_id, amount)?;
-                let tx = self.submit(vec![call], "split").await?;
-                self.confirmation(&tx.transaction_id, None, None).await
+                self.submit(vec![call], "split").await
             }
             RelayerAction::Merge {
                 condition_id,
                 amount,
             } => {
                 let call = merge_position(condition_id, amount)?;
-                let tx = self.submit(vec![call], "merge").await?;
-                self.confirmation(&tx.transaction_id, None, None).await
+                self.submit(vec![call], "merge").await
             }
             RelayerAction::Redeem => {
                 let condition_ids = self.collect_redeemable_condition_ids().await?;
@@ -382,18 +383,15 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
                 for cid in condition_ids {
                     calls.push(redeem_position(cid)?);
                 }
-                let tx = self.submit(calls, "redeem").await?;
-                self.confirmation(&tx.transaction_id, None, None).await
+                self.submit(calls, "redeem").await
             }
             RelayerAction::RedeemCondition { condition_id } => {
                 let call = redeem_position(condition_id)?;
-                let tx = self.submit(vec![call], "redeem").await?;
-                self.confirmation(&tx.transaction_id, None, None).await
+                self.submit(vec![call], "redeem").await
             }
             RelayerAction::Transfer { to, amount } => {
                 let call = transfer_position(to, amount)?;
-                let tx = self.submit(vec![call], "transfer").await?;
-                self.confirmation(&tx.transaction_id, None, None).await
+                self.submit(vec![call], "transfer").await
             }
         }
     }
@@ -443,19 +441,25 @@ impl<S: alloy::signers::Signer + Send + Sync> RelayerService<S> {
     }
 
     async fn collect_redeemable_condition_ids(&self) -> Result<Vec<FixedBytes<32>>> {
-        let safe = derive_safe_wallet(self.signer_address, self.config.chain_id)
-            .context("无法推导 SAFE 地址，请检查 chain_id 与 signer 地址")?;
-        let address = safe.to_string();
-        let data = DataService::default();
-
         let mut offset = 0;
         let limit = 100;
         let mut condition_ids: std::collections::BTreeSet<FixedBytes<32>> =
             std::collections::BTreeSet::new();
 
         loop {
-            let positions = data
-                .redeem_positions(&address, Some(limit), Some(offset))
+            let positions = self
+                .context
+                .data_client
+                .positions(
+                    &PositionsRequest::builder()
+                        .user(self.context.safe_address)
+                        .redeemable(true)
+                        .limit(limit)
+                        .context("redeem positions limit 非法")?
+                        .offset(offset)
+                        .context("redeem positions offset 非法")?
+                        .build(),
+                )
                 .await?;
             let batch_len = positions.len();
 
@@ -490,7 +494,7 @@ struct SafeTxParams {
     chain_id: u64,
 }
 
-fn safe_tx_hash(params: &SafeTxParams) -> alloy::primitives::B256 {
+fn safe_tx_hash(params: &SafeTxParams) -> alloy_primitives::B256 {
     let domain = eip712_domain! {
         chain_id: params.chain_id,
         verifying_contract: params.safe,
@@ -512,10 +516,7 @@ fn safe_tx_hash(params: &SafeTxParams) -> alloy::primitives::B256 {
     safe_tx.eip712_signing_hash(&domain)
 }
 
-async fn sign_safe_tx<S: alloy::signers::Signer>(
-    signer: &S,
-    params: &SafeTxParams,
-) -> Result<Bytes> {
+async fn sign_safe_tx<S: Signer>(signer: &S, params: &SafeTxParams) -> Result<Bytes> {
     let tx_hash = safe_tx_hash(params);
     let eth_signed_hash = keccak256(
         [
@@ -653,7 +654,7 @@ fn encode_multisend(calls: &[RelayerCall]) -> Result<Bytes> {
 }
 
 mod u256_string {
-    use alloy::primitives::U256;
+    use alloy_primitives::U256;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &U256, serializer: S) -> Result<S::Ok, S::Error>

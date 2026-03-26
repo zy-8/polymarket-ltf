@@ -8,8 +8,10 @@
 //! 之后再通过 authenticated user WebSocket 增量更新。
 
 use crate::errors::{PolyfillError, Result, StreamErrorKind};
+use crate::events;
 use crate::polymarket::types::open_orders::{OpenOrders, Order};
 use crate::polymarket::types::positions::{FeeRule, Fill, Position, Positions};
+use crate::storage::sqlite;
 use futures::StreamExt;
 use polymarket_client_sdk::auth::{ApiKey, Credentials, Normal, state::Authenticated};
 use polymarket_client_sdk::clob::{
@@ -22,7 +24,7 @@ use polymarket_client_sdk::data::{
 };
 use polymarket_client_sdk::types::{Address, B256, U256};
 use polymarket_client_sdk::ws::connection::ConnectionState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, sleep};
@@ -30,6 +32,14 @@ use tracing::{error, warn};
 
 const TERMINAL_CURSOR: &str = "LTE=";
 const REBOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+pub trait EventSink: Send + Sync {
+    fn ws_status(&self, status: &str);
+    fn user_state(&self, open_orders: &[Order], positions: &[Position]);
+    fn error(&self, message: String);
+    fn order(&self, order: &events::Order);
+    fn trade(&self, trade: &events::Trade);
+}
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -94,14 +104,16 @@ impl UserState {
     pub fn apply_trade_message(
         &mut self,
         msg: &polymarket_client_sdk::clob::ws::TradeMessage,
-    ) -> Result<()> {
-        if let Some(fill) = fill_from_trade_message(msg, self.owner, &self.order_contexts)? {
+    ) -> Result<Option<Fill>> {
+        let fill = fill_from_trade_message(msg, self.owner, &self.order_contexts)?;
+
+        if let Some(fill) = fill.clone() {
             self.positions.apply_fill(fill)?;
         }
 
         self.open_orders.apply_trade_message(msg, self.owner)?;
 
-        Ok(())
+        Ok(fill)
     }
 
     pub fn open_order_snapshot(&self) -> Vec<Order> {
@@ -131,6 +143,17 @@ impl UserState {
             },
         );
         Ok(())
+    }
+
+    fn prune_markets(&mut self, market_ids: &HashSet<B256>) -> (usize, usize, usize) {
+        let pruned_orders = self.open_orders.prune_markets(market_ids);
+        let pruned_positions = self.positions.prune_markets(market_ids);
+        let contexts_before = self.order_contexts.len();
+        self.order_contexts
+            .retain(|_, context| !market_ids.contains(&context.market_id));
+        let pruned_contexts = contexts_before - self.order_contexts.len();
+
+        (pruned_orders, pruned_positions, pruned_contexts)
     }
 }
 
@@ -239,6 +262,8 @@ impl Client {
         config: Config,
         user_state: UserState,
         clob_client: ClobClient<Authenticated<Normal>>,
+        store: Option<sqlite::Store>,
+        sink: Option<Arc<dyn EventSink>>,
     ) -> Result<Self> {
         let state = Arc::new(RwLock::new(user_state));
         let ws_client = WsClient::default()
@@ -246,12 +271,18 @@ impl Client {
             .map_err(|error| {
                 PolyfillError::internal_simple(format!("建立 Polymarket 用户 WS 失败: {error}"))
             })?;
-        let stream_task =
-            tokio::spawn(run_user_stream(Arc::clone(&state), ws_client.clone())).abort_handle();
+        let stream_task = tokio::spawn(run_user_stream(
+            Arc::clone(&state),
+            ws_client.clone(),
+            store,
+            sink.clone(),
+        ))
+        .abort_handle();
         let rebootstrap_task = tokio::spawn(run_rebootstrap_loop(
             Arc::clone(&state),
             clob_client,
             ws_client,
+            sink,
         ))
         .abort_handle();
 
@@ -262,6 +293,14 @@ impl Client {
     }
 
     pub async fn start(client: &ClobClient<Authenticated<Normal>>) -> Result<Self> {
+        Self::start_with_store(client, None, None).await
+    }
+
+    pub async fn start_with_store(
+        client: &ClobClient<Authenticated<Normal>>,
+        store: Option<sqlite::Store>,
+        sink: Option<Arc<dyn EventSink>>,
+    ) -> Result<Self> {
         let mut user_state = UserState::new(client.credentials().key());
         get_remote_orders(client, &mut user_state).await?;
         get_remote_positions(client.address(), &mut user_state).await?;
@@ -270,6 +309,8 @@ impl Client {
             Config::new(client.credentials().clone(), client.address()),
             user_state,
             client.clone(),
+            store,
+            sink,
         )
         .await
     }
@@ -288,6 +329,32 @@ impl Client {
             .read()
             .map_err(|_| PolyfillError::internal_simple("用户状态读锁已被污染"))?;
         Ok(guard.position_snapshot())
+    }
+
+    pub fn prune_markets(
+        &self,
+        market_ids: &HashSet<B256>,
+    ) -> Result<Option<(Vec<Order>, Vec<Position>)>> {
+        let (open_orders, positions, changed) = {
+            let mut guard = self
+                .state
+                .write()
+                .map_err(|_| PolyfillError::internal_simple("用户状态写锁已被污染"))?;
+            let (pruned_orders, pruned_positions, pruned_contexts) =
+                guard.prune_markets(market_ids);
+            let changed = pruned_orders > 0 || pruned_positions > 0 || pruned_contexts > 0;
+            (
+                guard.open_order_snapshot(),
+                guard.position_snapshot(),
+                changed,
+            )
+        };
+
+        if changed {
+            Ok(Some((open_orders, positions)))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn close(&self) {
@@ -387,6 +454,8 @@ async fn get_remote_orders(
 async fn run_user_stream(
     state: Arc<RwLock<UserState>>,
     ws_client: WsClient<Authenticated<Normal>>,
+    store: Option<sqlite::Store>,
+    sink: Option<Arc<dyn EventSink>>,
 ) {
     let mut stream = match ws_client.subscribe_user_events(Vec::new()) {
         Ok(stream) => Box::pin(stream),
@@ -399,12 +468,16 @@ async fn run_user_stream(
     while let Some(message) = stream.next().await {
         match message {
             Ok(WsMessage::Order(order)) => {
-                if let Err(error) = apply_order(&state, &order) {
+                if let Err(error) =
+                    apply_order(&state, &order, store.as_ref(), sink.as_deref()).await
+                {
                     warn!("应用用户 OrderMessage 失败: {}", error);
                 }
             }
             Ok(WsMessage::Trade(trade)) => {
-                if let Err(error) = apply_trade(&state, &trade) {
+                if let Err(error) =
+                    apply_trade(&state, &trade, store.as_ref(), sink.as_deref()).await
+                {
                     warn!("应用用户 TradeMessage 失败: {}", error);
                 }
             }
@@ -423,6 +496,7 @@ async fn run_rebootstrap_loop(
     state: Arc<RwLock<UserState>>,
     clob_client: ClobClient<Authenticated<Normal>>,
     ws_client: WsClient<Authenticated<Normal>>,
+    sink: Option<Arc<dyn EventSink>>,
 ) {
     let mut was_connected = matches!(
         ws_client.connection_state(ChannelType::User),
@@ -437,9 +511,24 @@ async fn run_rebootstrap_loop(
             ConnectionState::Connected { .. }
         );
 
+        if let Some(sink) = sink.as_ref() {
+            sink.ws_status(if is_connected {
+                "connected"
+            } else {
+                "reconnecting"
+            });
+        }
+
         if !was_connected && is_connected {
             if let Err(error) = rebootstrap_state(&state, &clob_client).await {
                 warn!("Polymarket 用户状态重连后 re-bootstrap 失败: {}", error);
+                if let Some(sink) = sink.as_ref() {
+                    sink.error(format!("user stream rebootstrap failed: {error}"));
+                }
+            } else if let Some(sink) = sink.as_ref() {
+                if let Ok(guard) = state.read() {
+                    sink.user_state(&guard.open_order_snapshot(), &guard.position_snapshot());
+                }
             }
         }
 
@@ -462,24 +551,64 @@ async fn rebootstrap_state(
     Ok(())
 }
 
-fn apply_order(
+async fn apply_order(
     state: &Arc<RwLock<UserState>>,
     order: &polymarket_client_sdk::clob::ws::OrderMessage,
+    store: Option<&sqlite::Store>,
+    sink: Option<&dyn EventSink>,
 ) -> Result<()> {
-    let mut guard = state
-        .write()
-        .map_err(|_| PolyfillError::internal_simple("用户状态写锁已被污染"))?;
-    guard.apply_order_message(order)
+    let (open_orders, positions) = {
+        let mut guard = state
+            .write()
+            .map_err(|_| PolyfillError::internal_simple("用户状态写锁已被污染"))?;
+        guard.apply_order_message(order)?;
+        (guard.open_order_snapshot(), guard.position_snapshot())
+    };
+    let event = events::Order::from_order_message(order);
+
+    if let Some(store) = store {
+        store.insert_order(&event).await?;
+    }
+    if let Some(sink) = sink {
+        sink.user_state(&open_orders, &positions);
+        sink.order(&event);
+    }
+
+    Ok(())
 }
 
-fn apply_trade(
+async fn apply_trade(
     state: &Arc<RwLock<UserState>>,
     trade: &polymarket_client_sdk::clob::ws::TradeMessage,
+    store: Option<&sqlite::Store>,
+    sink: Option<&dyn EventSink>,
 ) -> Result<()> {
-    let mut guard = state
-        .write()
-        .map_err(|_| PolyfillError::internal_simple("用户状态写锁已被污染"))?;
-    guard.apply_trade_message(trade)
+    let (owner, fill, open_orders, positions) = {
+        let mut guard = state
+            .write()
+            .map_err(|_| PolyfillError::internal_simple("用户状态写锁已被污染"))?;
+        let owner = guard.owner;
+        let fill = guard.apply_trade_message(trade)?;
+        (
+            owner,
+            fill,
+            guard.open_order_snapshot(),
+            guard.position_snapshot(),
+        )
+    };
+    let event = fill
+        .as_ref()
+        .map(|fill| events::Trade::from_trade_message(trade, owner, fill));
+
+    if let (Some(store), Some(event)) = (store, event.as_ref()) {
+        store.insert_trade(event).await?;
+    }
+    if let (Some(sink), Some(event)) = (sink, event.as_ref()) {
+        sink.user_state(&open_orders, &positions);
+        sink.trade(event);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -573,6 +702,76 @@ mod tests {
 
         assert!(state.open_orders.all().next().is_none());
         assert!(state.positions.all().next().is_none());
+    }
+
+    #[test]
+    fn test_prune_markets_removes_orders_positions_and_contexts() {
+        let mut state = user_state();
+        let closed_market = market();
+        let open_market = b256!("0000000000000000000000000000000000000000000000000000000000000002");
+        let closed_asset = asset();
+        let open_asset = U256::from(2_u64);
+
+        state
+            .apply_order_message(&placement_order(Side::Buy))
+            .expect("closed market order should apply");
+        state.order_contexts.insert(
+            "other-closed-order".to_string(),
+            OrderContext {
+                market_id: closed_market,
+                asset_id: closed_asset,
+                side: Side::Sell,
+                outcome: Some("Up".to_string()),
+            },
+        );
+        state.order_contexts.insert(
+            "open-market-order".to_string(),
+            OrderContext {
+                market_id: open_market,
+                asset_id: open_asset,
+                side: Side::Buy,
+                outcome: Some("Down".to_string()),
+            },
+        );
+        state
+            .positions
+            .bootstrap_position(
+                closed_market,
+                closed_asset,
+                Some("Up".to_string()),
+                Decimal::new(1, 0),
+                Decimal::new(5, 1),
+                Decimal::ZERO,
+                FeeRule::crypto(),
+            )
+            .unwrap();
+        state
+            .positions
+            .bootstrap_position(
+                open_market,
+                open_asset,
+                Some("Down".to_string()),
+                Decimal::new(2, 0),
+                Decimal::new(4, 1),
+                Decimal::ZERO,
+                FeeRule::crypto(),
+            )
+            .unwrap();
+
+        let mut closed_markets = HashSet::new();
+        closed_markets.insert(closed_market);
+        let (pruned_orders, pruned_positions, pruned_contexts) =
+            state.prune_markets(&closed_markets);
+
+        assert_eq!(pruned_orders, 1);
+        assert_eq!(pruned_positions, 1);
+        assert_eq!(pruned_contexts, 2);
+        assert!(state.open_orders.get("order-1").is_none());
+        assert!(state.positions.get(&closed_asset).is_none());
+        assert!(state.positions.get(&open_asset).is_some());
+        assert!(!state.order_contexts.contains_key("order-1"));
+        assert!(!state.order_contexts.contains_key("other-closed-order"));
+        assert!(state.order_contexts.contains_key("open-market-order"));
     }
 
     #[test]

@@ -104,12 +104,27 @@ cargo run --example snapshot_write
 cp .env.example .env
 ```
 
-其中当前真实使用的是：
+其中最小必填配置只有：
 
 - `PRIVATE_KEY`
   Polymarket CLOB 鉴权私钥
+
+可选覆盖项：
+
 - `SYMBOLS`
   默认监控或下单标的，逗号分隔，例如 `btc,eth`
+- `INTERVALS`
+  默认运行周期，逗号分隔，例如 `5m,15m`
+- `SQLITE_PATH`
+  事件 SQLite 路径
+- `ALLOW_ORDER_USDC`
+  正常放行候选使用的固定下单美元金额
+- `REDUCE_ORDER_USDC`
+  降档参与候选使用的固定下单美元金额
+- `CRYPTO_REVERSAL_ORDER_PRICE`
+  `0` 或不填表示继续按实时 Polymarket 报价下单；大于 `0` 时 `crypto_reversal` 触发后固定按该价格挂单
+- `POLYMARKET_LTF_LOG_DIR`
+  日志目录；默认使用当前运行目录下的 `logs/`
 
 常用 example：
 
@@ -122,7 +137,8 @@ cargo run --example clob_ok -- btc buy 5 0.55 0.55 gtc 2
 说明：
 
 - `cargo run`
-  默认只做 CLOB health check
+  启动 `crypto_reversal` runtime；策略参数和下单参数固定写在策略代码里
+  `5m` 固定在每个 300 秒窗口的第 `290` 秒后开始扫描，`15m` 固定在每个 900 秒窗口的第 `890` 秒后开始扫描
 - `user_monitor`
   启动账户 `open orders / positions` bootstrap 和 WS 增量监控
 - `clob_ok`

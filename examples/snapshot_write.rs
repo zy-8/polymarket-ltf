@@ -52,7 +52,8 @@ async fn run() -> Result<()> {
         &intervals,
     );
 
-    let binance = Arc::new(BinanceClient::connect(&symbols).await?);
+    let binance = Arc::new(BinanceClient::connect().await?);
+    binance.subscribe_books(&symbols)?;
     let chainlink = Arc::new(RtdsStreamClient::connect(&symbols)?);
 
     let mut snapshot = Snapshot::new(

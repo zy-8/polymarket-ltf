@@ -16,7 +16,7 @@ use polymarket_client_sdk::clob::{
 };
 use polymarket_client_sdk::types::{B256, U256};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Order {
@@ -139,6 +139,13 @@ impl OpenOrders {
         self.open_orders
             .retain(|_, order| is_active_order_status(&order.status));
         Ok(())
+    }
+
+    pub fn prune_markets(&mut self, market_ids: &HashSet<B256>) -> usize {
+        let before = self.open_orders.len();
+        self.open_orders
+            .retain(|_, order| !market_ids.contains(&order.market_id));
+        before - self.open_orders.len()
     }
 }
 

@@ -35,6 +35,17 @@
 
 - snapshot 字段语义稳定比短期开发方便更重要
 - 结果和日志必须可追溯
+- 交易所直接推送的原始数据，与本地派生指标必须明确分层
+
+对 Binance 当前口径，必须明确区分：
+
+- 交易所原始输入：
+  `bookTicker`、`kline`
+- 本地派生结果：
+  `mid price`、技术指标、策略信号、候选结果
+
+不要把 RSI、Bollinger Bands、MACD 这类本地计算结果误写成 Binance 直接推送字段。  
+如果某个指标是基于交易所原始 K 线推导出来的，文档和代码注释都应明确写成“本地派生”。
 
 ### 2.5 复用优先，避免补丁式扩张
 
@@ -58,7 +69,7 @@
 ### 3.1 Rust 实时层
 
 - `src/main.rs`
-  默认入口，适合健康检查和最小可运行流程
+  主程序入口；负责加载环境变量配置并启动当前 runtime
 - `src/lib.rs`
   公共模块导出入口
 - `src/errors.rs`
@@ -67,8 +78,18 @@
   环境变量与本地 `.env` 加载入口
 - `src/logging.rs`
   日志初始化
+- `src/events.rs`
+  仓库级 `Order / Trade / Strategy` 事件模型
+- `src/storage/sqlite.rs`
+  订单事件、成交事件和策略归因的 SQLite 持久化，以及 dashboard 最小历史读取
+- `src/strategy/crypto_reversal/service.rs`
+  候选评估、下一期 market 选择与背景周期过滤 helper
+- `src/strategy/crypto_reversal/execute.rs`
+  最小提交入口、HTTP 盘口定价和固定资金 sizing
+- `schema/init.sql`
+  SQLite 初始 schema；当前阶段通过 `sqlx + init.sql` 完成表初始化
 - `src/binance/websocket.rs`
-  当前 CEX 参考价格接入
+  Binance 接入，统一维护 `bookTicker`、`kline`、启动期 HTTP 历史回填、本地缓存与订阅控制
 - `src/polymarket/market_registry.rs`
   市场发现与订阅调度
 - `src/polymarket/orderbook_stream.rs`
@@ -76,7 +97,7 @@
 - `src/polymarket/rtds_stream.rs`
   Chainlink RTDS 价格接入
 - `src/polymarket/user_stream.rs`
-  用户 open orders / positions 启动同步与 WS 增量维护
+  用户 open orders / positions 启动同步、WS 增量维护，以及可选的 `orders / trades` SQLite 落库；不承担策略归因上下文
 - `src/polymarket/relayer.rs`
   Polymarket Relayer 交易辅助逻辑
 - `src/snapshot.rs`
@@ -85,6 +106,8 @@
   Rust 侧策略目录，适合放运行时策略和执行候选逻辑
 - `src/types/crypto.rs`
   `Symbol` 与 `Interval`
+- `src/types/market.rs`
+  仓库级通用 candle 类型
 - `src/polymarket/types/open_orders.rs`
   本地 open orders 状态模型
 - `src/polymarket/types/positions.rs`
@@ -177,6 +200,14 @@
 - Rust 运行时策略、执行候选或实时决策逻辑：
   放 `src/strategy/`
 
+策略 service 可以暴露：
+
+- 输入订阅 helper
+- 只读评估入口
+
+但不要在策略目录里重复实现交易所连接客户端；  
+交易所连接、重连、订阅控制和本地缓存应继续收敛在各自的数据源模块内。
+
 不要把两类策略目录混用。  
 如果一个策略还没有脱离研究阶段，不要提前塞进 Rust 运行时目录。
 
@@ -187,6 +218,14 @@
 - websocket 消息解析
 - 本地状态更新
 - snapshot 构造
+
+### 4.6 Rustls provider 规则
+
+- 应用入口必须显式安装 rustls `CryptoProvider`，不要把 provider 选择留给依赖树自动推断
+- 仓库依赖树应收敛到单一 provider；当前标准选择是 `ring`
+- 如果上游 crate 默认带入别的 provider，优先向上游提交 feature 修复，例如改成 `rustls-no-provider` 或暴露显式 provider 选择
+- 本地 `vendor/` 只能作为临时过渡，用来验证或等待上游合并；不要把长期维护建立在永久 vendor 上
+- 新增或升级网络依赖后，至少检查一次 `cargo tree -i rustls -e features`，确认没有重新混入第二个 provider
 - 高频循环内的格式转换
 - 回测主循环
 

@@ -73,8 +73,15 @@ fn init_file_writer() -> std::io::Result<NonBlocking> {
 fn log_directory() -> PathBuf {
     match std::env::var(LOG_DIR_ENV) {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("logs"),
+        _ => default_log_directory(),
     }
+}
+
+fn default_log_directory() -> PathBuf {
+    std::env::current_dir()
+        .ok()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("logs")
 }
 
 fn install_panic_hook() {
@@ -164,5 +171,11 @@ mod tests {
         assert!(contents.contains("hello tracing appender"));
 
         let _ = fs::remove_dir_all(log_dir);
+    }
+
+    #[test]
+    fn default_log_directory_uses_current_dir() {
+        let path = default_log_directory();
+        assert_eq!(path, std::env::current_dir().unwrap().join("logs"));
     }
 }

@@ -1,0 +1,4 @@
+user_data/data/
+user_data/backtest_results/
+user_data/hyperopt_results/
+user_data/tradesv3.sqlite

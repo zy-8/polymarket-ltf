@@ -441,6 +441,13 @@ impl Positions {
     pub fn apply_data_trade(&mut self, trade: &DataTrade, is_taker: bool) -> Result<()> {
         self.apply_fill(Fill::from_data_trade(trade, is_taker)?)
     }
+
+    pub fn prune_markets(&mut self, market_ids: &HashSet<B256>) -> usize {
+        let before = self.positions.len();
+        self.positions
+            .retain(|_, position| !market_ids.contains(&position.market_id));
+        before - self.positions.len()
+    }
 }
 
 fn synthetic_data_trade_id(trade: &DataTrade) -> String {

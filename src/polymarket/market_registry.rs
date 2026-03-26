@@ -12,7 +12,7 @@ use crate::types::crypto::{Interval, Symbol};
 use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::gamma::types::response::Market;
-use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk::types::{B256, U256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::task::AbortHandle;
@@ -27,7 +27,13 @@ const AUTO_SWITCH_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default, Clone)]
 pub struct MarketRegistry {
-    markets_by_slug: HashMap<String, [U256; 2]>,
+    markets_by_slug: HashMap<String, MarketEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarketEntry {
+    condition_id: B256,
+    assets: [U256; 2],
 }
 
 impl MarketRegistry {
@@ -36,11 +42,21 @@ impl MarketRegistry {
     }
 
     pub fn insert(&mut self, slug: impl Into<String>, market: [U256; 2]) {
-        self.markets_by_slug.insert(slug.into(), market);
+        self.insert_entry(slug, B256::ZERO, market);
+    }
+
+    pub fn insert_entry(&mut self, slug: impl Into<String>, condition_id: B256, assets: [U256; 2]) {
+        self.markets_by_slug.insert(
+            slug.into(),
+            MarketEntry {
+                condition_id,
+                assets,
+            },
+        );
     }
 
     pub fn get(&self, slug: &str) -> Option<[U256; 2]> {
-        self.markets_by_slug.get(slug).copied()
+        self.markets_by_slug.get(slug).map(|entry| entry.assets)
     }
 
     pub fn current_market(
@@ -48,15 +64,7 @@ impl MarketRegistry {
         symbols: &[Symbol],
         intervals: &[Interval],
     ) -> Result<Vec<[U256; 2]>> {
-        let mut markets = Vec::new();
-
-        for slug in current_slugs(symbols, intervals)? {
-            if let Some(market) = self.markets_by_slug.get(&slug).copied() {
-                markets.push(market);
-            }
-        }
-
-        Ok(markets)
+        self.collect_assets(current_slugs(symbols, intervals)?)
     }
 
     pub fn next_market(
@@ -64,27 +72,19 @@ impl MarketRegistry {
         symbols: &[Symbol],
         intervals: &[Interval],
     ) -> Result<Vec<[U256; 2]>> {
-        let mut markets = Vec::new();
-
-        for slug in next_slugs(symbols, intervals)? {
-            if let Some(market) = self.markets_by_slug.get(&slug).copied() {
-                markets.push(market);
-            }
-        }
-
-        Ok(markets)
+        self.collect_assets(next_slugs(symbols, intervals)?)
     }
 
     pub fn markets(&self, symbols: &[Symbol], intervals: &[Interval]) -> Result<Vec<[U256; 2]>> {
-        let mut markets = Vec::new();
+        self.collect_assets(expected_slugs(symbols, intervals)?)
+    }
 
-        for slug in expected_slugs(symbols, intervals)? {
-            if let Some(market) = self.markets_by_slug.get(&slug).copied() {
-                markets.push(market);
-            }
-        }
-
-        Ok(markets)
+    pub fn current_market_ids(
+        &self,
+        symbols: &[Symbol],
+        intervals: &[Interval],
+    ) -> Result<Vec<B256>> {
+        self.collect_condition_ids(current_slugs(symbols, intervals)?)
     }
 
     pub async fn refresh(
@@ -105,7 +105,7 @@ impl MarketRegistry {
     fn replace_window(
         &mut self,
         expected_slugs: Vec<String>,
-        discovered: HashMap<String, [U256; 2]>,
+        discovered: HashMap<String, MarketEntry>,
     ) {
         for slug in &expected_slugs {
             if !discovered.contains_key(slug) {
@@ -114,8 +114,31 @@ impl MarketRegistry {
         }
 
         for (slug, market) in discovered {
-            self.insert(slug, market);
+            self.insert_entry(slug, market.condition_id, market.assets);
         }
+    }
+
+    fn collect_assets(&self, slugs: Vec<String>) -> Result<Vec<[U256; 2]>> {
+        Ok(self
+            .collect_entries(slugs)
+            .into_iter()
+            .map(|entry| entry.assets)
+            .collect())
+    }
+
+    fn collect_condition_ids(&self, slugs: Vec<String>) -> Result<Vec<B256>> {
+        Ok(self
+            .collect_entries(slugs)
+            .into_iter()
+            .map(|entry| entry.condition_id)
+            .collect())
+    }
+
+    fn collect_entries(&self, slugs: Vec<String>) -> Vec<MarketEntry> {
+        slugs
+            .into_iter()
+            .filter_map(|slug| self.markets_by_slug.get(&slug).copied())
+            .collect()
     }
 }
 
@@ -245,10 +268,7 @@ pub async fn current_active_market(
     symbol: Symbol,
     interval: Interval,
 ) -> Result<Option<[U256; 2]>> {
-    let slug = current_slug(symbol, interval)?;
-    let markets = discover_by_slugs(client, vec![slug]).await?;
-
-    Ok(markets.into_values().next())
+    discover_single_market(client, current_slug(symbol, interval)?).await
 }
 
 pub async fn next_active_market(
@@ -256,10 +276,7 @@ pub async fn next_active_market(
     symbol: Symbol,
     interval: Interval,
 ) -> Result<Option<[U256; 2]>> {
-    let slug = next_slug(symbol, interval)?;
-    let markets = discover_by_slugs(client, vec![slug]).await?;
-
-    Ok(markets.into_values().next())
+    discover_single_market(client, next_slug(symbol, interval)?).await
 }
 
 pub async fn active_markets(
@@ -267,18 +284,33 @@ pub async fn active_markets(
     symbols: &[Symbol],
     intervals: &[Interval],
 ) -> Result<Vec<[U256; 2]>> {
-    let slugs = expected_slugs(symbols, intervals)?;
-    let markets = discover_by_slugs(client, slugs).await?;
+    discover_market_assets(client, expected_slugs(symbols, intervals)?).await
+}
 
-    Ok(markets.into_values().collect())
+async fn discover_single_market(client: &GammaClient, slug: String) -> Result<Option<[U256; 2]>> {
+    Ok(discover_market_assets(client, vec![slug])
+        .await?
+        .into_iter()
+        .next())
+}
+
+async fn discover_market_assets(
+    client: &GammaClient,
+    slugs: Vec<String>,
+) -> Result<Vec<[U256; 2]>> {
+    Ok(discover_by_slugs(client, slugs)
+        .await?
+        .into_values()
+        .map(|entry| entry.assets)
+        .collect())
 }
 
 async fn discover_by_slugs(
     client: &GammaClient,
     slugs: Vec<String>,
-) -> Result<HashMap<String, [U256; 2]>> {
+) -> Result<HashMap<String, MarketEntry>> {
     let markets = client
-        .markets(&MarketsRequest::builder().slug(slugs).closed(false).build())
+        .markets(&MarketsRequest::builder().slug(slugs).limit(150).build())
         .await
         .map_err(|e| PolyfillError::internal_simple(format!("查询 Gamma 市场失败: {e}")))?;
 
@@ -288,54 +320,58 @@ async fn discover_by_slugs(
         .collect())
 }
 
-fn active_market_entry(market: Market) -> Option<(String, [U256; 2])> {
+fn active_market_entry(market: Market) -> Option<(String, MarketEntry)> {
     if market.active != Some(true) || market.closed == Some(true) {
         return None;
     }
 
-    if market.enable_order_book == Some(false) || market.accepting_orders == Some(false) {
-        return None;
-    }
-
     let slug = market.slug?;
+    let condition_id = market.condition_id?;
     let token_ids = market.clob_token_ids?;
     let [up_asset_id, down_asset_id] = token_ids.as_slice() else {
         return None;
     };
 
-    Some((slug, [*up_asset_id, *down_asset_id]))
+    Some((
+        slug,
+        MarketEntry {
+            condition_id,
+            assets: [*up_asset_id, *down_asset_id],
+        },
+    ))
 }
 
 fn expected_slugs(symbols: &[Symbol], intervals: &[Interval]) -> Result<Vec<String>> {
-    let mut slugs = Vec::new();
-
-    for symbol in symbols {
-        for interval in intervals {
-            slugs.extend(slugs_for_hours(*symbol, *interval, REGISTRY_HORIZON_HOURS)?);
-        }
-    }
-
-    Ok(slugs)
+    collect_slugs(symbols, intervals, |symbol, interval| {
+        slugs_for_hours(symbol, interval, REGISTRY_HORIZON_HOURS)
+    })
 }
 
 fn current_slugs(symbols: &[Symbol], intervals: &[Interval]) -> Result<Vec<String>> {
-    let mut slugs = Vec::new();
-
-    for symbol in symbols {
-        for interval in intervals {
-            slugs.push(current_slug(*symbol, *interval)?);
-        }
-    }
-
-    Ok(slugs)
+    collect_slugs(symbols, intervals, |symbol, interval| {
+        Ok(vec![current_slug(symbol, interval)?])
+    })
 }
 
 fn next_slugs(symbols: &[Symbol], intervals: &[Interval]) -> Result<Vec<String>> {
+    collect_slugs(symbols, intervals, |symbol, interval| {
+        Ok(vec![next_slug(symbol, interval)?])
+    })
+}
+
+fn collect_slugs<F>(
+    symbols: &[Symbol],
+    intervals: &[Interval],
+    mut expand: F,
+) -> Result<Vec<String>>
+where
+    F: FnMut(Symbol, Interval) -> Result<Vec<String>>,
+{
     let mut slugs = Vec::new();
 
     for symbol in symbols {
         for interval in intervals {
-            slugs.push(next_slug(*symbol, *interval)?);
+            slugs.extend(expand(*symbol, *interval)?);
         }
     }
 
