@@ -118,13 +118,19 @@ cp .env.example .env
 - `SQLITE_PATH`
   事件 SQLite 路径
 - `ALLOW_ORDER_USDC`
-  正常放行候选使用的固定下单美元金额
+  必填；正常放行候选使用的固定下单美元金额
 - `REDUCE_ORDER_USDC`
-  降档参与候选使用的固定下单美元金额
+  必填；降档参与候选使用的固定下单美元金额
 - `CRYPTO_REVERSAL_ORDER_PRICE`
   `0` 或不填表示继续按实时 Polymarket 报价下单；大于 `0` 时 `crypto_reversal` 触发后固定按该价格挂单
 - `POLYMARKET_LTF_LOG_DIR`
   日志目录；默认使用当前运行目录下的 `logs/`
+
+配置优先级：
+
+- 根目录 `.env`
+- 进程环境变量
+- 代码默认值
 
 常用 example：
 

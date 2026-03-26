@@ -74,12 +74,12 @@ flowchart TD
 - `INTERVALS=5m`
 - `SQLITE_PATH=data/runtime/events.sqlite3`
 - `SCAN_INTERVAL_MS=1000`
-- `ALLOW_ORDER_USDC=4.0`
-- `REDUCE_ORDER_USDC=3.0`
 - `CRYPTO_REVERSAL_ORDER_PRICE=0`
 
 说明：
 
+- 根目录 `.env` 优先于同名进程环境变量；两者都没有时才回落到代码默认值
+- `ALLOW_ORDER_USDC` 和 `REDUCE_ORDER_USDC` 没有代码默认值，必须在根目录 `.env` 或进程环境变量里显式提供
 - `SCAN_INTERVAL_MS` 不决定窗口起点
 - 它只控制“进入扫描窗口以后”的轮询频率
 - `CRYPTO_REVERSAL_ORDER_PRICE` 为 `0` 或未设置时，执行层继续查询 Polymarket 实时买价

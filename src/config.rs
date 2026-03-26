@@ -11,8 +11,6 @@ use crate::types::crypto::{Interval, Symbol};
 const DEFAULT_ENV_PATH: &str = ".env";
 const DEFAULT_CLOB_HOST: &str = "https://clob.polymarket.com";
 const DEFAULT_SQLITE_PATH: &str = "data/runtime/events.sqlite3";
-const DEFAULT_ALLOW_ORDER_USDC: f64 = 4.0;
-const DEFAULT_REDUCE_ORDER_USDC: f64 = 3.0;
 
 const PRIVATE_KEY_ENV: &str = "PRIVATE_KEY";
 const HOST_ENV: &str = "CLOB_HOST";
@@ -29,7 +27,7 @@ const CRYPTO_REVERSAL_ORDER_PRICE_ENV: &str = "CRYPTO_REVERSAL_ORDER_PRICE";
 ///
 /// 规则保持克制：
 /// - 文件不存在时直接跳过；
-/// - 已存在的系统环境变量不覆盖；
+/// - `.env` 内的值覆盖同名系统环境变量；
 /// - 只支持 `KEY=VALUE` 的简单行格式。
 pub fn load_env_file(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
@@ -58,10 +56,6 @@ pub fn load_env_file(path: impl AsRef<Path>) -> Result<()> {
                 path.display(),
                 index + 1
             )));
-        }
-
-        if std::env::var_os(key).is_some() {
-            continue;
         }
 
         let value = value.trim().trim_matches('"').trim_matches('\'');
@@ -94,6 +88,91 @@ impl TradingConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn temp_env_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("polymarket-ltf-{name}-{nanos}.env"))
+    }
+
+    fn clear_env(key: &str) {
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn env_file_overrides_existing_env_var() {
+        let _guard = env_lock();
+        let path = temp_env_path("override");
+        fs::write(&path, "ALLOW_ORDER_USDC=4.0\n").unwrap();
+        unsafe {
+            std::env::set_var(ALLOW_ORDER_USDC_ENV, "9.0");
+        }
+
+        load_env_file(&path).unwrap();
+
+        assert_eq!(std::env::var(ALLOW_ORDER_USDC_ENV).unwrap(), "4.0");
+
+        clear_env(ALLOW_ORDER_USDC_ENV);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn runtime_config_reads_overridden_values_from_env_file() {
+        let _guard = env_lock();
+        let path = temp_env_path("runtime");
+        fs::write(
+            &path,
+            "ALLOW_ORDER_USDC=4.0\nREDUCE_ORDER_USDC=3.0\nCRYPTO_REVERSAL_ORDER_PRICE=0.42\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var(ALLOW_ORDER_USDC_ENV, "9.0");
+            std::env::set_var(REDUCE_ORDER_USDC_ENV, "8.0");
+            std::env::set_var(CRYPTO_REVERSAL_ORDER_PRICE_ENV, "0.11");
+        }
+
+        load_env_file(&path).unwrap();
+        let runtime = RuntimeConfig::from_env(&Env).unwrap();
+
+        assert_eq!(runtime.allow_order_usdc, 4.0);
+        assert_eq!(runtime.reduce_order_usdc, 3.0);
+        assert_eq!(
+            runtime.crypto_reversal_order_price,
+            Some(Decimal::from_str("0.42").unwrap())
+        );
+
+        clear_env(ALLOW_ORDER_USDC_ENV);
+        clear_env(REDUCE_ORDER_USDC_ENV);
+        clear_env(CRYPTO_REVERSAL_ORDER_PRICE_ENV);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn runtime_config_requires_order_usdc_values() {
+        let _guard = env_lock();
+        clear_env(ALLOW_ORDER_USDC_ENV);
+        clear_env(REDUCE_ORDER_USDC_ENV);
+
+        let error = RuntimeConfig::from_env(&Env).unwrap_err();
+
+        assert!(error.to_string().contains(ALLOW_ORDER_USDC_ENV));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub intervals: Vec<Interval>,
@@ -117,12 +196,8 @@ impl RuntimeConfig {
             scan_interval: Duration::from_millis(
                 env.parsed::<u64>(SCAN_INTERVAL_MS_ENV)?.unwrap_or(1_000),
             ),
-            allow_order_usdc: env
-                .positive_f64(ALLOW_ORDER_USDC_ENV)?
-                .unwrap_or(DEFAULT_ALLOW_ORDER_USDC),
-            reduce_order_usdc: env
-                .positive_f64(REDUCE_ORDER_USDC_ENV)?
-                .unwrap_or(DEFAULT_REDUCE_ORDER_USDC),
+            allow_order_usdc: env.required_positive_f64(ALLOW_ORDER_USDC_ENV)?,
+            reduce_order_usdc: env.required_positive_f64(REDUCE_ORDER_USDC_ENV)?,
             crypto_reversal_order_price: env
                 .probability_price_or_zero(CRYPTO_REVERSAL_ORDER_PRICE_ENV)?,
         })
@@ -181,13 +256,13 @@ impl Env {
             .map_err(|error| PolyfillError::validation(format!("环境变量 {key} 解析失败: {error}")))
     }
 
-    fn positive_f64(&self, key: &str) -> Result<Option<f64>> {
+    fn required_positive_f64(&self, key: &str) -> Result<f64> {
         let Some(value) = self.parsed::<f64>(key)? else {
-            return Ok(None);
+            return Err(PolyfillError::validation(format!("缺少环境变量 {key}")));
         };
 
         if value > 0.0 {
-            Ok(Some(value))
+            Ok(value)
         } else {
             Err(PolyfillError::validation(format!(
                 "环境变量 {key} 必须大于 0"
