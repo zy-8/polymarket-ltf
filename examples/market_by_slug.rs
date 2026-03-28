@@ -10,7 +10,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    polymarket_ltf::logging::init();
+    polymarket_ltf::init_process()?;
 
     let mut args = std::env::args().skip(1);
     let symbol = args

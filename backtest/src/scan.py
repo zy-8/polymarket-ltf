@@ -13,15 +13,15 @@ from backtest import (
     add_output_args,
     load_rows_for_args,
 )
-from engine.engine import BacktestConfig, BacktestEngine
+from engine import BacktestConfig, BacktestEngine
 from report import write_html_report, write_quantstats_reports
-from reports.reporting import (
+from reporting import (
     BatchReport,
     StrategyDescriptor,
     build_batch_report,
     build_run_artifact,
 )
-from strategies.registry import (
+from strategy_lib import (
     strategy_scan_variants_from_args,
 )
 

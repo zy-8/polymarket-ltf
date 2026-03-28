@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from reports.reporting import BatchReport, load_batch_report, run_file_label
+from reporting import BatchReport, load_batch_report, run_file_label
 
 if TYPE_CHECKING:
     import pandas as pd

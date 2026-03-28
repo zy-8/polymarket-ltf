@@ -16,7 +16,10 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
-    polymarket_ltf::logging::init();
+    if let Err(err) = polymarket_ltf::init_process() {
+        eprintln!("failed to initialize process: {err}");
+        std::process::exit(1);
+    }
 
     if let Err(err) = run().await {
         error!(error = %err, error_debug = ?err, "snapshot_write exited with error");

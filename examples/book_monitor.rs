@@ -21,7 +21,7 @@ struct MarketQuotes {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    polymarket_ltf::logging::init();
+    polymarket_ltf::init_process()?;
 
     let symbols = [Symbol::Btc];
     let intervals = [Interval::M5];

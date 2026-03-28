@@ -21,24 +21,28 @@ from backtest import (
     maybe_write_reports,
     resolve_csv_paths,
 )
-from data.snapshot_csv import load_snapshot_csv
-from domain.models import Position, SnapshotRow
-from engine.engine import BacktestConfig, BacktestEngine
+from engine import BacktestConfig, BacktestEngine
+from models import Position, SnapshotRow
 from report import write_html_report
-from reports.reporting import (
+from reporting import (
     StrategyDescriptor,
     build_batch_report,
     build_group_summary,
     build_run_artifact,
     format_group_summary,
 )
+from snapshot_io import load_snapshot_csv
 from scan import (
     run_parameter_scan,
     scan_results_to_dataframe,
     write_scan_outputs,
 )
-from strategies.mean_reversion import MeanReversionZScoreStrategy
-from strategies.registry import parse_decimal_grid, parse_int_grid, strategy_scan_variants_from_args
+from strategy_lib import (
+    MeanReversionZScoreStrategy,
+    parse_decimal_grid,
+    parse_int_grid,
+    strategy_scan_variants_from_args,
+)
 
 
 CSV_FIXTURE = """\

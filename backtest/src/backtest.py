@@ -4,17 +4,17 @@ import argparse
 from decimal import Decimal
 from pathlib import Path
 
-from data.registry import add_data_format_arg, load_rows_by_paths
-from engine.engine import BacktestConfig, BacktestEngine
-from report import write_html_report, write_quantstats_reports
-from reports.reporting import (
+from engine import BacktestConfig, BacktestEngine
+from reporting import (
     StrategyDescriptor,
     build_batch_report,
     build_run_artifact,
     format_group_summary,
     write_batch_report,
 )
-from strategies.registry import (
+from report import write_html_report, write_quantstats_reports
+from snapshot_io import add_data_format_arg, load_rows_by_paths
+from strategy_lib import (
     add_strategy_arg,
     add_strategy_parameter_args,
     build_strategy_from_args,

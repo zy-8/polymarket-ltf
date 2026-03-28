@@ -385,13 +385,22 @@ cargo clippy --all-targets --all-features -D warnings
 
 ```bash
 make ubuntu
+make win
+make main-ubuntu
+make main-win
+make snapshot-write-ubuntu
 ```
 
 产物路径：
 
 ```text
-target/x86_64-unknown-linux-gnu/release/polymarket-ltf
+target/dist/polymarket-ltf-ubuntu-x86_64/
+target/dist/polymarket-ltf-windows-x86_64/
+target/dist/snapshot-write-ubuntu-x86_64/
 ```
+
+其中 Ubuntu / Windows 主程序发布目录都包含对应 `scripts/` 启动脚本。
+`ubuntu` / `win` 是 `main-ubuntu` / `main-win` 的兼容别名。
 
 ## 6. 编码风格与命名
 

@@ -147,9 +147,18 @@ cargo run --example clob_ok -- btc buy 5 0.55 0.55 gtc 2
   启动 `crypto_reversal` runtime；策略参数和下单参数固定写在策略代码里
   `5m` 固定在每个 300 秒窗口的第 `290` 秒后开始扫描，`15m` 固定在每个 900 秒窗口的第 `890` 秒后开始扫描
 - `make ubuntu`
+  `make main-ubuntu` 的别名
   交叉编译 Ubuntu x86_64 release 二进制，适合本地 macOS 构建后上传到 EC2
   需要本机已安装 `cargo-zigbuild` 和 `zig`
-  输出路径是 `target/x86_64-unknown-linux-gnu/release/polymarket-ltf`
+  发布目录是 `target/dist/polymarket-ltf-ubuntu-x86_64/`
+- `make win`
+  `make main-win` 的别名
+  交叉编译 Windows x86_64 release 二进制
+  发布目录是 `target/dist/polymarket-ltf-windows-x86_64/`
+  包含 `scripts/polymarket-ltf.bat`
+- `make snapshot-write-ubuntu`
+  生成 `snapshot_write` Ubuntu x86_64 发布目录，包含二进制和 `scripts/snapshot-write.sh`
+  产物路径是 `target/dist/snapshot-write-ubuntu-x86_64/`
 - `user_monitor`
   启动账户 `open orders / positions` bootstrap 和 WS 增量监控
 - `clob_ok`

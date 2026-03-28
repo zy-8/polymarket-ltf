@@ -22,7 +22,7 @@ const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    polymarket_ltf::logging::init();
+    polymarket_ltf::init_process()?;
     let config = AppConfig::load().map_err(anyhow::Error::from)?;
     let trading = &config.trading;
     let (symbols, side, size, up_price, down_price, order_type, poll_interval) =

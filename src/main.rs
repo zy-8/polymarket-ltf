@@ -1,7 +1,6 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    install_rustls_crypto_provider()?;
-    polymarket_ltf::logging::init();
+    polymarket_ltf::init_process()?;
     let dashboard = polymarket_ltf::dashboard::start().await?;
     dashboard.runtime_status("starting");
 
@@ -28,10 +27,4 @@ async fn main() -> anyhow::Result<()> {
 
     futures::future::pending::<()>().await;
     Ok(())
-}
-
-fn install_rustls_crypto_provider() -> anyhow::Result<()> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))
 }
