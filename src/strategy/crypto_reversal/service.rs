@@ -211,16 +211,9 @@ pub fn from_registry(
     candles: &[Candle],
     registry: &Arc<RwLock<MarketRegistry>>,
 ) -> Result<Option<Candidate>> {
-    let market_slug = next_slug(config.symbol, config.interval)?;
-    let exists = registry
-        .read()
-        .map_err(|_| PolyfillError::internal_simple("Polymarket market registry 读锁已被污染"))?
-        .get(&market_slug)
-        .is_some();
-
-    if !exists {
+    let Some(market_slug) = next_registered_market_slug(config, registry)? else {
         return Ok(None);
-    }
+    };
 
     Ok(candidate(config, candles, Some(&market_slug)))
 }
@@ -231,13 +224,7 @@ pub fn evaluate_from_registry(
     registry: &Arc<RwLock<MarketRegistry>>,
 ) -> Result<Evaluation> {
     let market_slug = next_slug(config.symbol, config.interval)?;
-    let exists = registry
-        .read()
-        .map_err(|_| PolyfillError::internal_simple("Polymarket market registry 读锁已被污染"))?
-        .get(&market_slug)
-        .is_some();
-
-    if !exists {
+    if next_registered_market_slug(config, registry)?.is_none() {
         return Ok(Evaluation {
             symbol: config.symbol,
             interval: config.interval,
@@ -247,6 +234,20 @@ pub fn evaluate_from_registry(
     }
 
     Ok(evaluate(config, candles, Some(&market_slug)))
+}
+
+fn next_registered_market_slug(
+    config: &Config,
+    registry: &Arc<RwLock<MarketRegistry>>,
+) -> Result<Option<String>> {
+    let market_slug = next_slug(config.symbol, config.interval)?;
+    let exists = registry
+        .read()
+        .map_err(|_| PolyfillError::internal_simple("Polymarket market registry 读锁已被污染"))?
+        .get(&market_slug)
+        .is_some();
+
+    Ok(exists.then_some(market_slug))
 }
 
 pub fn evaluate_from_input(

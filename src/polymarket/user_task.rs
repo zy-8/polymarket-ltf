@@ -1,64 +1,39 @@
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use polymarket_client_sdk::data::Client as DataClient;
-use polymarket_client_sdk::data::types::response::ClosedPosition;
-use polymarket_client_sdk::data::types::{
-    ClosedPositionSortBy, SortDirection, request::ClosedPositionsRequest,
-};
-use polymarket_client_sdk::types::Address;
+use polymarket_client_sdk::data::types::request::PositionsRequest;
 use tokio::task::AbortHandle;
 use tracing::{info, warn};
 
-use crate::errors::PolyfillError;
 use crate::polymarket::relayer::{RelayerAction, RelayerService};
+use crate::polymarket::utils::http;
 use crate::strategy::StrategyContext;
 
 const AUTO_REDEEM_INTERVAL: Duration = Duration::from_secs(60);
-const CLOSED_POSITIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
 
-#[derive(Clone, Default)]
-pub struct ClosedPositionsCache {
-    inner: Arc<RwLock<Vec<ClosedPosition>>>,
-}
-
-impl ClosedPositionsCache {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn replace(&self, positions: Vec<ClosedPosition>) {
-        if let Ok(mut guard) = self.inner.write() {
-            *guard = positions;
-        }
-    }
-
-    pub fn snapshot(&self) -> Vec<ClosedPosition> {
-        self.inner
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
-    }
-}
-
-pub fn auto_redeem_task(context: StrategyContext) -> AbortHandle {
+pub fn user_task(context: StrategyContext) -> AbortHandle {
     tokio::spawn(async move {
-        let relayer = RelayerService::new(context);
+        let relayer = RelayerService::new(context.clone());
 
         loop {
-            match relayer.run(RelayerAction::Redeem).await {
-                Ok(tx) if tx.transaction_id == "noop-no-redeemable-positions" => {}
-                Ok(tx) => {
-                    info!(
-                        transaction_id = %tx.transaction_id,
-                        state = ?tx.state,
-                        transaction_hash = ?tx.transaction_hash,
-                        "auto redeem submitted"
-                    );
-                }
-                Err(error) => {
-                    warn!(error = %error, "auto redeem failed");
-                }
+            if let Err(error) = sync_outcomes(&context).await {
+                warn!(error = %error, "strategy outcome sync failed");
+            }
+
+            if let Err(error) = store_positions(&context).await {
+                warn!(
+                    error = %error,
+                    address = %context.safe_address,
+                    "positions sync failed"
+                );
+            }
+
+            if let Err(error) = auto_redeem(&relayer).await {
+                warn!(error = %error, "auto redeem failed");
             }
 
             tokio::time::sleep(AUTO_REDEEM_INTERVAL).await;
@@ -67,44 +42,85 @@ pub fn auto_redeem_task(context: StrategyContext) -> AbortHandle {
     .abort_handle()
 }
 
-pub fn closed_positions_cache_task(
-    context: StrategyContext,
-    cache: ClosedPositionsCache,
-) -> AbortHandle {
-    tokio::spawn(async move {
-        loop {
-            match fetch_all_closed_positions(&context.data_client, context.safe_address).await {
-                Ok(positions) => cache.replace(positions),
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        address = %context.safe_address,
-                        "closed_positions cache refresh failed"
-                    );
-                }
-            }
+async fn sync_outcomes(context: &StrategyContext) -> crate::errors::Result<()> {
+    let pending = context.store.select_pending_strategy_outcomes().await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
 
-            tokio::time::sleep(CLOSED_POSITIONS_REFRESH_INTERVAL).await;
-        }
-    })
-    .abort_handle()
+    let outcomes = retry("sync outcomes", || http::outcomes(&pending)).await?;
+    if outcomes.is_empty() {
+        return Ok(());
+    }
+
+    context.store.update_strategy_outcomes(&outcomes).await
 }
 
-async fn fetch_all_closed_positions(
-    client: &DataClient,
-    user: Address,
-) -> crate::errors::Result<Vec<ClosedPosition>> {
-    let request = ClosedPositionsRequest::builder()
-        .user(user)
-        .limit(50)
-        .map_err(|error| {
-            PolyfillError::validation(format!("closed_positions limit 非法: {error}"))
-        })?
-        .sort_by(ClosedPositionSortBy::Timestamp)
-        .sort_direction(SortDirection::Desc)
-        .build();
-
-    client.closed_positions(&request).await.map_err(|error| {
-        PolyfillError::internal_simple(format!("查询 closed_positions 失败 user={user}: {error}"))
+async fn store_positions(context: &StrategyContext) -> crate::errors::Result<()> {
+    let positions = retry("store positions", || async {
+        let request = PositionsRequest::builder()
+            .user(context.safe_address)
+            .redeemable(true)
+            .build();
+        context
+            .data_client
+            .positions(&request)
+            .await
+            .map_err(|error| {
+                crate::errors::PolyfillError::internal_simple(format!(
+                    "查询 redeemable positions 失败 user={}: {error}",
+                    context.safe_address
+                ))
+            })
     })
+    .await?;
+
+    context.store.insert_positions(&positions).await
+}
+
+async fn auto_redeem(relayer: &RelayerService) -> crate::errors::Result<()> {
+    let tx = retry("auto redeem", || async {
+        relayer
+            .run(RelayerAction::Redeem)
+            .await
+            .map_err(|error| crate::errors::PolyfillError::internal_simple(format!("{error}")))
+    })
+    .await?;
+
+    if tx.transaction_id == "noop-no-redeemable-positions" {
+        Ok(())
+    } else {
+        info!(
+            transaction_id = %tx.transaction_id,
+            state = ?tx.state,
+            transaction_hash = ?tx.transaction_hash,
+            "auto redeem submitted"
+        );
+        Ok(())
+    }
+}
+
+async fn retry<F, Fut, T>(name: &str, mut op: F) -> crate::errors::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = crate::errors::Result<T>>,
+{
+    let mut attempt = 0;
+
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(_error) if attempt < RETRY_DELAYS.len() => {
+                let delay = RETRY_DELAYS[attempt];
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            Err(error) => {
+                return Err(crate::errors::PolyfillError::internal_simple(format!(
+                    "{name} failed after {} retries: {error}",
+                    RETRY_DELAYS.len()
+                )));
+            }
+        }
+    }
 }

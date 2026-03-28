@@ -5,20 +5,27 @@
 这份文档定义多策略实时面板的 HTTP 返回结构、字段命名规范和数据边界。
 
 当前目标是一个以实时监控为主的 Web 面板，不是通用开放 API。
-当前实现采用“HTTP 快照轮询 + HTTP 按需读取”的模式：
+当前实现采用“HTTP info 轮询 + HTTP 按需读取”的模式：
 
-- `/api/snapshot`
-  提供当前完整快照，前端首屏加载和定时轮询都从这里读取
+- `/api/info`
+  提供当前完整 info，前端首屏加载和定时轮询都从这里读取
 - `/api/positions`
   按策略返回当前持仓明细
 - `/api/open-orders`
   按策略返回当前未成交订单明细
-- `/api/closed-positions`
+- `/api/positions-page`
   按策略返回已结算历史记录结果
+
+前端表格交互规则：
+
+- 表格视窗固定展示 10 条记录高度
+- 持仓和未成交订单在前端本地按 10 条一批滚动展开
+- 历史记录使用 `/api/positions-page` 的 `page / page_size` 做滚动到底自动续页
 
 ## Design Rules
 
-- 所有字段使用 `snake_case`
+- 默认返回字段使用 `snake_case`
+- 历史已结算记录 payload 直接复用 SQLite `positions` 子集，为兼容现有前端保留 camelCase 字段
 - 所有时间字段统一使用毫秒时间戳，命名为 `*_ms`
 - 价格、数量、金额统一使用字符串传输
 - 枚举值统一使用小写字符串
@@ -26,9 +33,9 @@
 - 策略名统一使用 `strategy`
 - 订单、成交、资产 ID 保留原始字段语义，不混用
 
-## Snapshot
+## Info
 
-前端首屏和后续轮询都读取当前完整快照：
+前端首屏和后续轮询都读取当前完整 info：
 
 ```json
 {
@@ -49,10 +56,17 @@
   "server_time_ms": 1710000000000,
   "open_order_count": 4,
   "position_count": 2,
+  "trigger_count": 15,
+  "closed_count": 6,
+  "today_closed_count": 2,
+  "closed_win_count": 4,
+  "closed_loss_count": 2,
+  "missed_count": 9,
+  "missed_win_count": 5,
+  "missed_loss_count": 4,
   "today_order_count": 15,
   "today_trade_count": 9,
-  "today_notional_usdc": "51.77",
-  "settled_count": 6,
+  "today_closed_pnl_usdc": "51.77",
   "settled_pnl_usdc": "3.42",
   "last_error": null
 }
@@ -79,25 +93,34 @@
 {
   "strategy": "crypto_reversal",
   "status": "running",
+  "outcome": "up",
   "last_scan_ms": 1710000000000,
   "last_signal_ms": 1710000001000,
   "last_order_ms": 1710000002000,
   "last_trade_ms": 1710000003000,
   "open_order_count": 2,
   "position_count": 1,
+  "trigger_count": 12,
+  "closed_count": 4,
+  "today_closed_count": 1,
+  "closed_win_count": 3,
+  "closed_loss_count": 1,
+  "missed_count": 8,
+  "missed_win_count": 5,
+  "missed_loss_count": 3,
   "today_order_count": 12,
   "today_trade_count": 8,
-  "today_notional_usdc": "43.21",
-  "settled_count": 4,
+  "today_closed_pnl_usdc": "43.21",
   "settled_pnl_usdc": "2.18",
   "last_error": null
 }
 ```
 
-当前策略快照只保留摘要字段和 `latest_signal`；
-持仓、未成交订单、历史记录明细统一走独立查询接口，避免把大列表塞进 `/api/snapshot`。
+当前策略 info 只保留摘要字段和 `latest_signal`；
+持仓、未成交订单、历史记录明细统一走独立查询接口，避免把大列表塞进 `/api/info`。
 
-前端通过 `/api/snapshot` 获取当前状态；当前不再维护 dashboard 专用 WebSocket 增量流。
+前端通过 `/api/info` 获取当前状态；当前不再维护 dashboard 专用 WebSocket 增量流。
+其中 `trigger_count / closed_count / today_closed_count` 由后端在返回 info 时直接查询 SQLite 聚合，不再由前端拼装。
 
 字段定义：
 
@@ -105,6 +128,8 @@
   策略主键名，例如 `crypto_reversal`
 - `status`
   当前策略状态：`starting | running | degraded | stopped`
+- `outcome`
+  最近一次已知结算方向；没有结果时为空字符串
 - `last_scan_ms`
   最近一次扫描时间
 - `last_signal_ms`
@@ -117,23 +142,37 @@
   当前该策略关联的活跃挂单数
 - `position_count`
   当前该策略关联的持仓数
+- `trigger_count`
+  策略触发次数；来源于 `strategy` 表
+- `closed_count`
+  已关联 closed position 的数量；来源于 `positions`
+- `today_closed_count`
+  今日抓到的 closed position 数量；来源于 `positions.timestamp`
+- `closed_win_count`
+  已关联 closed position 且 `side = outcome` 的数量
+- `closed_loss_count`
+  已关联 closed position 且 `side != outcome` 的数量
+- `missed_count`
+  未关联 closed position 的数量
+- `missed_win_count`
+  未关联 closed position 且 `side = outcome` 的数量
+- `missed_loss_count`
+  未关联 closed position 且 `side != outcome` 的数量
 - `today_order_count`
   今日订单数
 - `today_trade_count`
   今日成交数
-- `today_notional_usdc`
-  今日成交金额
-- `settled_count`
-  已结算仓位数量；来源于 `closed_positions`
+- `today_closed_pnl_usdc`
+  今日抓到的 closed position 累计盈亏
 - `settled_pnl_usdc`
-  已结算累计盈亏；来源于 `closed_positions.realized_pnl`
+  已结算累计盈亏；优先来源于 `positions.cash_pnl`
 - `last_error`
   最近一次错误；没有则为 `null`
 
 ## Polling Model
 
-dashboard 当前只对外暴露 `snapshot` 消息形状。
-运行时内部仍然按 `signal / order / trade / error` 更新状态，但这些变化由前端下一次 `/api/snapshot` 轮询统一读取，不再单独对外推送增量事件。
+dashboard 当前只对外暴露 `info` 消息形状。
+运行时内部仍然按 `signal / order / trade / error` 更新状态，但这些变化由前端下一次 `/api/info` 轮询统一读取，不再单独对外推送增量事件。
 
 ## Detail APIs
 
@@ -196,7 +235,7 @@ dashboard 当前只对外暴露 `snapshot` 消息形状。
 - `size`
 - `created_at_ms`
 
-### `/api/closed-positions`
+### `/api/positions-page`
 
 查询参数：
 
@@ -209,32 +248,32 @@ dashboard 当前只对外暴露 `snapshot` 消息形状。
 - `page_size`
   可选，默认 `10`
 
-返回结构里的 `rows` 直接使用原始 `closed_positions` 字段：
+前端当前固定使用 `page_size=10`，首屏请求第 1 页，滚动到底后继续请求后续页并追加到当前列表。
+
+返回结构里的 `rows` 使用当前 SQLite `positions` 表已保存的关键字段：
 
 - `proxyWallet`
 - `asset`
 - `conditionId`
+- `marketSlug`
+- `outcome`
 - `avgPrice`
+- `size`
 - `totalBought`
+- `currentValue`
+- `cashPnl`
 - `realizedPnl`
 - `curPrice`
-- `title`
-- `slug`
-- `icon`
-- `eventSlug`
-- `outcome`
-- `outcomeIndex`
-- `oppositeOutcome`
-- `oppositeAsset`
 - `endDate`
 - `timestamp`
+  本地抓取该已结算快照的时间戳，单位毫秒
 
 命名规则：
 
 - 统一使用短名，不给事件类型叠额外语义
 - 订单状态变化放在 `order.payload.status` 里表达
 - 成交事实统一用 `trade`
-- 右侧事件流默认由前端本地维护一个滚动窗口，不在 `snapshot` 里补历史事件
+- 右侧事件流默认由前端本地维护一个滚动窗口，不在 `info` 里补历史事件
 
 ### Signal Payload
 
@@ -324,7 +363,7 @@ dashboard 当前只对外暴露 `snapshot` 消息形状。
 
 ### Position Payload
 
-详情面板里的实时持仓来自进程内 `positions` 内存快照：
+详情面板里的实时持仓来自进程内 `positions` 内存 info：
 
 ```json
 {
@@ -346,34 +385,36 @@ dashboard 当前只对外暴露 `snapshot` 消息形状。
 
 ### Settlement Payload
 
-详情面板里的已结算结果来自官方 `closed_positions` 接口，再按本地 `strategy` 归因过滤：
+详情面板里的已结算结果来自官方 `positions(redeemable=true)` 接口，再按本地 `strategy` 归因过滤：
+
+抓取结果会按当前本地 schema 需要的字段子集写入 SQLite `positions` 表；
+当前 dashboard 面板仍然使用运行时内存结果做过滤与展示。
 
 ```json
 {
   "proxyWallet": "0x0000000000000000000000000000000000000000",
   "asset": "12345",
   "conditionId": "0xabc",
+  "marketSlug": "eth-updown-march-24-1005",
+  "outcome": "Yes",
   "avgPrice": "0.43",
+  "size": "8",
   "totalBought": "8",
+  "currentValue": "1",
+  "cashPnl": "0.57",
   "realizedPnl": "0.57",
   "curPrice": "0",
-  "title": "ETH Up or Down - March 24, 10:05AM-10:10AM ET",
-  "slug": "eth-updown-march-24-1005",
-  "icon": "https://...",
-  "eventSlug": "eth-updown-march-24-1005",
-  "outcome": "Yes",
-  "outcomeIndex": 0,
-  "oppositeOutcome": "No",
-  "oppositeAsset": "67890",
   "endDate": "2026-03-25T00:00:00Z",
   "timestamp": 1710003600000
 }
 ```
 
+其中 `timestamp` 表示本地抓取这条 closed position 快照的时间，不表示成交时间或市场结算原始时间。
+
 面板只展示能匹配到本地 `strategy` 记录的 closed position，不展示账户里无归因的其他已结算仓位。
 
-历史记录通过 `/api/closed-positions?strategy=...` 按需读取；
-`snapshot.strategies[].settlements` 只保留一个小窗口，避免把长列表反复通过实时流传输。
+历史记录通过 `/api/positions-page?strategy=...` 按需读取；
+`info.strategies[].settlements` 只保留一个小窗口，避免把长列表反复通过实时流传输。
 
 ### Strategy Attribution Payload
 
@@ -444,8 +485,8 @@ dashboard 当前只对外暴露 `snapshot` 消息形状。
 dashboard 视图再额外分成两层：
 
 - `positions`
-  进程内实时仓位快照
-- `closed_positions`
+  进程内实时仓位 info
+- `positions`
   官方接口返回的已结算仓位，再按 `strategy` 归因过滤
 
 这几层不能重新混回一张表，也不要让 `orders/trades` 重新承担策略解释语义。

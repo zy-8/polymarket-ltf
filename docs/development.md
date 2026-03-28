@@ -87,7 +87,7 @@
 - `src/strategy/crypto_reversal/execute.rs`
   最小提交入口、HTTP 盘口定价和固定资金 sizing
 - `schema/init.sql`
-  SQLite 初始 schema；当前阶段通过 `sqlx + init.sql` 完成表初始化
+  SQLite 初始 schema；当前阶段通过 `sqlx + init.sql` 完成 `orders / trades / strategy / positions` 表初始化
 - `src/binance/websocket.rs`
   Binance 接入，统一维护 `bookTicker`、`kline`、启动期 HTTP 历史回填、本地缓存与订阅控制
 - `src/polymarket/market_registry.rs`
@@ -98,6 +98,8 @@
   Chainlink RTDS 价格接入
 - `src/polymarket/user_stream.rs`
   用户 open orders / positions 启动同步、WS 增量维护，以及可选的 `orders / trades` SQLite 落库；不承担策略归因上下文
+- `src/polymarket/user_task.rs`
+  自动 redeem 前的 `redeemable positions` 抓取，以及关键字段子集的 SQLite 写入
 - `src/polymarket/relayer.rs`
   Polymarket Relayer 交易辅助逻辑
 - `src/snapshot.rs`
@@ -338,6 +340,7 @@
 - `cargo bench --bench ws_hot_paths`
 - `cargo fmt`
 - `cargo clippy --all-targets --all-features -D warnings`
+- `make ubuntu`
 
 常用 Python 命令：
 
@@ -361,6 +364,33 @@ cargo test
 
 ```bash
 cargo clippy --all-targets --all-features -D warnings
+```
+
+### 5.1 Ubuntu 交叉编译
+
+仓库当前提供 `make ubuntu` 作为本地打包 Ubuntu x86_64 release 二进制的便捷入口。
+
+适用场景：
+
+- 在 macOS 本地编译后上传到 Ubuntu / EC2 运行
+- 避免把发布构建步骤散落成手工命令
+
+依赖要求：
+
+- `cargo-zigbuild`
+- `zig`
+- `rustup target add x86_64-unknown-linux-gnu`
+
+对应命令：
+
+```bash
+make ubuntu
+```
+
+产物路径：
+
+```text
+target/x86_64-unknown-linux-gnu/release/polymarket-ltf
 ```
 
 ## 6. 编码风格与命名

@@ -55,7 +55,6 @@ pub struct Trade {
     pub id: String,
     pub order_id: Option<String>,
     pub trade_id: String,
-    pub asset_id: String,
     pub side: String,
     pub price: Decimal,
     pub size: Decimal,
@@ -80,7 +79,6 @@ impl Trade {
             id: fill.id.clone(),
             order_id,
             trade_id: msg.id.clone(),
-            asset_id: fill.asset_id.to_string(),
             side: market_side_name(fill.side).to_string(),
             price: fill.price,
             size: fill.size,
@@ -94,26 +92,36 @@ impl Trade {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Strategy {
     pub order_id: String,
+    pub asset_id: String,
     pub strategy: String,
     pub symbol: String,
     pub interval: String,
     pub market_slug: String,
     pub side: String,
+    pub outcome: String,
     pub created_at: i64,
     pub event: String,
 }
 
 impl Strategy {
-    pub fn from_candidate(strategy: &str, order_id: String, candidate: &Candidate) -> Self {
+    pub fn from_candidate(
+        strategy: &str,
+        order_id: String,
+        asset_id: String,
+        candidate: &Candidate,
+        outcome: String,
+    ) -> Self {
         let model = crate::strategy::crypto_reversal::constants::default_model_config();
 
         Self {
             order_id,
+            asset_id,
             strategy: strategy.to_string(),
             symbol: candidate.symbol.as_slug().to_string(),
             interval: candidate.interval.as_slug().to_string(),
             market_slug: candidate.market_slug.clone(),
             side: strategy_side_name(candidate.side).to_string(),
+            outcome,
             created_at: Utc::now().timestamp_millis(),
             event: json!({
                 "signal_time_ms": candidate.signal_time_ms,

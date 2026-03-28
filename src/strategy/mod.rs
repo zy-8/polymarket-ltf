@@ -17,9 +17,8 @@ use polymarket_client_sdk::{POLYGON, derive_safe_wallet};
 
 use crate::config::AppConfig;
 use crate::dashboard::Handle as DashboardHandle;
-use crate::polymarket::user_task::{
-    ClosedPositionsCache, auto_redeem_task, closed_positions_cache_task,
-};
+use crate::polymarket::user_task::user_task;
+use crate::storage::sqlite::Store;
 
 pub mod crypto_reversal;
 
@@ -31,21 +30,19 @@ pub struct StrategyContext {
     pub data_client: DataClient,
     pub gamma_client: GammaClient,
     pub safe_address: Address,
+    pub store: Store,
 }
 
 pub async fn run(app: &AppConfig, dashboard: DashboardHandle) -> Result<()> {
     let context = build_context(app).await?;
-    let closed_positions_cache = ClosedPositionsCache::new();
-    dashboard.attach_closed_positions_cache(closed_positions_cache.clone());
-    let _user_task = auto_redeem_task(context.clone());
-    let _closed_positions_task =
-        closed_positions_cache_task(context.clone(), closed_positions_cache);
+    let _user_task = user_task(context.clone());
 
     crypto_reversal::runtime::run(app, dashboard, context).await
 }
 
 async fn build_context(app: &AppConfig) -> Result<StrategyContext> {
     let signer = load_signer(&app.trading.private_key)?;
+    let store = Store::open(&app.runtime.sqlite_path).await?;
     let clob_client = ClobClient::new(&app.trading.host, ClobConfig::default())?
         .authentication_builder(&signer)
         .signature_type(SignatureType::GnosisSafe)
@@ -64,6 +61,7 @@ async fn build_context(app: &AppConfig) -> Result<StrategyContext> {
         data_client,
         gamma_client,
         safe_address,
+        store,
     })
 }
 

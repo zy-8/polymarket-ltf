@@ -96,6 +96,7 @@ cargo check
 cargo run
 cargo bench --bench ws_hot_paths
 cargo run --example snapshot_write
+make ubuntu
 ```
 
 账户相关 example 需要先配置根目录 `.env`，可以从 `.env.example` 复制：
@@ -104,10 +105,14 @@ cargo run --example snapshot_write
 cp .env.example .env
 ```
 
-其中最小必填配置只有：
+其中最小必填配置是：
 
 - `PRIVATE_KEY`
   Polymarket CLOB 鉴权私钥
+- `ALLOW_ORDER_USDC`
+  正常放行候选使用的固定下单美元金额
+- `REDUCE_ORDER_USDC`
+  降档参与候选使用的固定下单美元金额
 
 可选覆盖项：
 
@@ -117,10 +122,6 @@ cp .env.example .env
   默认运行周期，逗号分隔，例如 `5m,15m`
 - `SQLITE_PATH`
   事件 SQLite 路径
-- `ALLOW_ORDER_USDC`
-  必填；正常放行候选使用的固定下单美元金额
-- `REDUCE_ORDER_USDC`
-  必填；降档参与候选使用的固定下单美元金额
 - `CRYPTO_REVERSAL_ORDER_PRICE`
   `0` 或不填表示继续按实时 Polymarket 报价下单；大于 `0` 时 `crypto_reversal` 触发后固定按该价格挂单
 - `POLYMARKET_LTF_LOG_DIR`
@@ -145,6 +146,10 @@ cargo run --example clob_ok -- btc buy 5 0.55 0.55 gtc 2
 - `cargo run`
   启动 `crypto_reversal` runtime；策略参数和下单参数固定写在策略代码里
   `5m` 固定在每个 300 秒窗口的第 `290` 秒后开始扫描，`15m` 固定在每个 900 秒窗口的第 `890` 秒后开始扫描
+- `make ubuntu`
+  交叉编译 Ubuntu x86_64 release 二进制，适合本地 macOS 构建后上传到 EC2
+  需要本机已安装 `cargo-zigbuild` 和 `zig`
+  输出路径是 `target/x86_64-unknown-linux-gnu/release/polymarket-ltf`
 - `user_monitor`
   启动账户 `open orders / positions` bootstrap 和 WS 增量监控
 - `clob_ok`

@@ -4,10 +4,11 @@ const state = {
   selectedStrategy: null,
   currentTab: "positions",
   search: "",
-  snapshotPollTimer: null,
+  infoPollTimer: null,
   positionsView: {
     strategy: null,
     rows: [],
+    visibleCount: 10,
     total: 0,
     loading: false,
     error: null,
@@ -16,6 +17,7 @@ const state = {
   openOrdersView: {
     strategy: null,
     rows: [],
+    visibleCount: 10,
     total: 0,
     loading: false,
     error: null,
@@ -25,7 +27,7 @@ const state = {
     strategy: null,
     range: "all",
     page: 1,
-    pageSize: 100,
+    pageSize: 10,
     total: 0,
     totalPages: 0,
     rows: [],
@@ -36,12 +38,13 @@ const state = {
 };
 
 const HISTORY_RANGE = "all";
+const PAGE_SIZE = 10;
+const SCROLL_THRESHOLD_PX = 24;
 
 const nodes = {
   connectionStatus: document.getElementById("connection-status"),
   portfolioValue: document.getElementById("portfolio-value"),
   portfolioSecondary: document.getElementById("portfolio-secondary"),
-  portfolioSideValue: document.getElementById("portfolio-side-value"),
   statusStrip: document.getElementById("status-strip"),
   heroActions: document.getElementById("hero-actions"),
   accountError: document.getElementById("account-error"),
@@ -80,34 +83,34 @@ async function fetchJson(url) {
   return response.json();
 }
 
-async function loadSnapshot() {
+async function loadInfo() {
   try {
-    applySnapshot(await fetchJson("/api/snapshot"));
+    applyInfo(await fetchJson("/api/info"));
     setConnectionStatus("轮询同步", "connected");
     render();
   } catch (error) {
     setConnectionStatus("轮询失败", "disconnected");
-    setAccountError(`快照加载失败: ${error.message || error}`, "tone-negative");
+    setAccountError(`info 加载失败: ${error.message || error}`, "tone-negative");
     render();
   }
 }
 
-function startSnapshotPolling() {
-  if (state.snapshotPollTimer) return;
-  state.snapshotPollTimer = window.setInterval(() => {
-    void loadSnapshot();
+function startInfoPolling() {
+  if (state.infoPollTimer) return;
+  state.infoPollTimer = window.setInterval(() => {
+    void loadInfo();
   }, 3000);
 }
 
-function stopSnapshotPolling() {
-  if (!state.snapshotPollTimer) return;
-  window.clearInterval(state.snapshotPollTimer);
-  state.snapshotPollTimer = null;
+function stopInfoPolling() {
+  if (!state.infoPollTimer) return;
+  window.clearInterval(state.infoPollTimer);
+  state.infoPollTimer = null;
 }
 
-function applySnapshot(payload) {
+function applyInfo(payload) {
   const previousStrategy = state.selectedStrategy;
-  const previousSettled = selectedStrategy()?.settled_count ?? 0;
+  const previousClosed = selectedStrategy()?.closed_count ?? 0;
 
   state.account = payload.account;
   state.strategies = payload.strategies || [];
@@ -117,7 +120,7 @@ function applySnapshot(payload) {
   }
 
   const strategyChanged = previousStrategy !== state.selectedStrategy;
-  const nextSettled = selectedStrategy()?.settled_count ?? 0;
+  const nextClosed = selectedStrategy()?.closed_count ?? 0;
 
   if (strategyChanged) {
     resetPositionsView();
@@ -127,13 +130,14 @@ function applySnapshot(payload) {
     return;
   }
 
-  if (state.selectedStrategy) {
-    void refreshActiveTab(false);
-  }
-
-  if (previousSettled !== nextSettled && state.selectedStrategy && state.currentTab === "history") {
+  if (previousClosed !== nextClosed && state.selectedStrategy && state.currentTab === "history") {
     resetSettlementsPage();
     void refreshActiveTab(true);
+    return;
+  }
+
+  if (state.selectedStrategy) {
+    void refreshActiveTab(false);
   }
 }
 
@@ -153,6 +157,7 @@ function resetSettlementsPage() {
     strategy: state.selectedStrategy,
     range: HISTORY_RANGE,
     page: 1,
+    pageSize: PAGE_SIZE,
     total: 0,
     totalPages: 0,
     rows: [],
@@ -166,6 +171,7 @@ function resetPositionsView() {
     ...state.positionsView,
     strategy: state.selectedStrategy,
     rows: [],
+    visibleCount: PAGE_SIZE,
     total: 0,
     loading: false,
     error: null,
@@ -177,6 +183,7 @@ function resetOpenOrdersView() {
     ...state.openOrdersView,
     strategy: state.selectedStrategy,
     rows: [],
+    visibleCount: PAGE_SIZE,
     total: 0,
     loading: false,
     error: null,
@@ -271,20 +278,24 @@ async function loadOpenOrders() {
   renderTable();
 }
 
-async function loadClosedPositions() {
+async function loadPositionsPage(options = {}) {
   if (!state.selectedStrategy) {
     resetSettlementsPage();
     return;
   }
 
+  const { append = false } = options;
+  const previousScrollTop = append ? nodes.tableBody.scrollTop : 0;
+  const previousScrollHeight = append ? nodes.tableBody.scrollHeight : 0;
+  const nextPage = append ? state.settlementsPage.page + 1 : 1;
   const hasRows = state.settlementsPage.strategy === state.selectedStrategy && (state.settlementsPage.rows || []).length > 0;
   const requestId = state.settlementsPage.requestId + 1;
   state.settlementsPage = {
     ...state.settlementsPage,
     strategy: state.selectedStrategy,
     range: HISTORY_RANGE,
-    page: 1,
-    loading: !hasRows,
+    page: append ? state.settlementsPage.page : 1,
+    loading: append || !hasRows,
     error: null,
     requestId,
   };
@@ -293,12 +304,12 @@ async function loadClosedPositions() {
   const params = new URLSearchParams({
     strategy: state.selectedStrategy,
     range: HISTORY_RANGE,
-    page: "1",
+    page: String(nextPage),
     page_size: String(state.settlementsPage.pageSize),
   });
 
   try {
-    const payload = await fetchJson(`/api/closed-positions?${params.toString()}`);
+    const payload = await fetchJson(`/api/positions-page?${params.toString()}`);
     if (state.settlementsPage.requestId !== requestId) return;
 
     state.settlementsPage = {
@@ -309,7 +320,7 @@ async function loadClosedPositions() {
       pageSize: payload.page_size,
       total: payload.total,
       totalPages: payload.total_pages,
-      rows: payload.rows || [],
+      rows: append ? [...(state.settlementsPage.rows || []), ...(payload.rows || [])] : payload.rows || [],
       loading: false,
       error: null,
     };
@@ -324,6 +335,12 @@ async function loadClosedPositions() {
   }
 
   renderTable();
+
+  if (append) {
+    const nextScrollHeight = nodes.tableBody.scrollHeight;
+    const heightDelta = Math.max(0, nextScrollHeight - previousScrollHeight);
+    nodes.tableBody.scrollTop = previousScrollTop + heightDelta;
+  }
 }
 
 function render() {
@@ -337,17 +354,15 @@ function renderOverview() {
   const account = state.account;
   if (!account) {
     nodes.portfolioValue.textContent = "--";
-    nodes.portfolioSecondary.textContent = "等待首个快照";
-    nodes.portfolioSideValue.textContent = "--";
+    nodes.portfolioSecondary.textContent = "等待首个 info";
     nodes.statusStrip.innerHTML = "";
     nodes.heroActions.innerHTML = "";
-    setAccountError("当前无账户快照", "tone-neutral");
+    setAccountError("当前无账户 info", "tone-neutral");
     return;
   }
 
   nodes.portfolioValue.textContent = formatMoney(account.settled_pnl_usdc);
-  nodes.portfolioSecondary.textContent = `累计已结算盈亏 · ${account.settled_count || 0} 笔`;
-  nodes.portfolioSideValue.textContent = formatMoney(account.today_notional_usdc);
+  nodes.portfolioSecondary.textContent = `累计已结算盈亏 · ${account.closed_count || 0} 笔`;
 
   nodes.statusStrip.innerHTML = [
     statusCard("运行状态", badge(statusLabel(account.runtime_status), account.runtime_status)),
@@ -356,9 +371,14 @@ function renderOverview() {
   ].join("");
 
   nodes.heroActions.innerHTML = [
-    actionCard("当前仓位", String(account.position_count ?? 0)),
-    actionCard("未成交订单", String(account.open_order_count ?? 0)),
-    actionCard("今日成交", String(account.today_trade_count ?? 0)),
+    actionCard("成交总数", `${account.closed_count || 0} 笔`),
+    actionCard("成交胜率", formatRate(account.closed_win_count, account.closed_count)),
+    actionCard("成交胜次数", `${account.closed_win_count || 0} 次`),
+    actionCard("成交负次数", `${account.closed_loss_count || 0} 次`),
+    actionCard("未成交总数", `${account.missed_count || 0} 笔`),
+    actionCard("未成交胜率", formatRate(account.missed_win_count, account.missed_count)),
+    actionCard("未成交胜次数", `${account.missed_win_count || 0} 次`),
+    actionCard("未成交负次数", `${account.missed_loss_count || 0} 次`),
   ].join("");
 
   setAccountError(account.last_error || "当前无错误", account.last_error ? "tone-negative" : "tone-neutral");
@@ -376,8 +396,15 @@ function renderStrategies() {
             ${badge(statusLabel(strategy.status), strategy.status)}
           </div>
           <div class="strategy-chip-meta">
-            <span>仓位 ${strategy.position_count ?? 0}</span>
-            <span>${formatMoney(strategy.settled_pnl_usdc)}</span>
+            <span>触发总数 ${strategy.trigger_count ?? 0}</span>
+            <span>成交总数 ${strategy.closed_count ?? 0}</span>
+            <span>成交胜率 ${formatRate(strategy.closed_win_count, strategy.closed_count)}</span>
+            <span>成交胜次数 ${strategy.closed_win_count ?? 0}</span>
+            <span>成交负次数 ${strategy.closed_loss_count ?? 0}</span>
+            <span>未成交总数 ${strategy.missed_count ?? 0}</span>
+            <span>未成交胜率 ${formatRate(strategy.missed_win_count, strategy.missed_count)}</span>
+            <span>未成交胜次数 ${strategy.missed_win_count ?? 0}</span>
+            <span>未成交负次数 ${strategy.missed_loss_count ?? 0}</span>
           </div>
         </button>
       `;
@@ -390,7 +417,7 @@ function renderTabs() {
   const strategy = selectedStrategy();
   const positionsCount = strategy?.position_count ?? 0;
   const openOrdersCount = strategy?.open_order_count ?? 0;
-  const historyCount = strategy?.settled_count ?? 0;
+  const historyCount = strategy?.closed_count ?? 0;
 
   const tabs = [
     { key: "positions", label: `持仓 ${positionsCount}` },
@@ -417,6 +444,7 @@ function renderTable() {
   if (!strategy) {
     nodes.tableHead.innerHTML = "";
     nodes.tableBody.innerHTML = `<div class="empty-state">等待策略数据。</div>`;
+    nodes.tableBody.classList.add("is-empty");
     nodes.tableSummary.textContent = "暂无内容";
     return;
   }
@@ -424,6 +452,7 @@ function renderTable() {
   const view = currentTableView(strategy);
   nodes.tableHead.innerHTML = view.columns.map((column) => `<div>${column}</div>`).join("");
   nodes.tableBody.innerHTML = view.rowsHtml;
+  nodes.tableBody.classList.toggle("is-empty", Boolean(view.isEmpty));
   nodes.tableSummary.textContent = view.summary || "";
 }
 
@@ -440,12 +469,14 @@ function currentTableView(strategy) {
 function renderPositionsView(strategy) {
   const columns = ["盘口", "方向", "持仓份额", "均价", "成本", "已实现盈亏"];
   const rows = filterRows(sortPositions(state.positionsView.rows || []));
+  const visibleRows = rows.slice(0, state.positionsView.visibleCount || PAGE_SIZE);
 
   if (state.positionsView.loading && rows.length === 0) {
     return {
       columns,
       rowsHtml: `<div class="empty-state">持仓加载中。</div>`,
       summary: "正在加载持仓",
+      isEmpty: true,
     };
   }
 
@@ -454,6 +485,7 @@ function renderPositionsView(strategy) {
       columns,
       rowsHtml: `<div class="empty-state tone-negative">${escapeHtml(state.positionsView.error)}</div>`,
       summary: "持仓加载失败",
+      isEmpty: true,
     };
   }
 
@@ -462,25 +494,29 @@ function renderPositionsView(strategy) {
       columns,
       rowsHtml: `<div class="empty-state">当前没有匹配的持仓。</div>`,
       summary: `共 ${state.positionsView.total || 0} 条持仓`,
+      isEmpty: true,
     };
   }
 
   return {
     columns,
-    rowsHtml: rows.map(renderPositionRow).join(""),
-    summary: `共 ${state.positionsView.total || rows.length} 条持仓`,
+    rowsHtml: `${visibleRows.map(renderPositionRow).join("")}${renderLoadMoreMarker(visibleRows.length < rows.length)}`,
+    summary: `显示 ${visibleRows.length}/${rows.length} 条持仓`,
+    isEmpty: false,
   };
 }
 
 function renderOrdersView(strategy) {
   const columns = ["盘口", "方向", "状态", "挂单价格", "剩余数量", "创建时间"];
   const rows = filterRows(sortOrders(state.openOrdersView.rows || []));
+  const visibleRows = rows.slice(0, state.openOrdersView.visibleCount || PAGE_SIZE);
 
   if (state.openOrdersView.loading && rows.length === 0) {
     return {
       columns,
       rowsHtml: `<div class="empty-state">未成交订单加载中。</div>`,
       summary: "正在加载未成交订单",
+      isEmpty: true,
     };
   }
 
@@ -489,6 +525,7 @@ function renderOrdersView(strategy) {
       columns,
       rowsHtml: `<div class="empty-state tone-negative">${escapeHtml(state.openOrdersView.error)}</div>`,
       summary: "未成交订单加载失败",
+      isEmpty: true,
     };
   }
 
@@ -497,25 +534,28 @@ function renderOrdersView(strategy) {
       columns,
       rowsHtml: `<div class="empty-state">当前没有匹配的未成交订单。</div>`,
       summary: `未成交订单 ${state.openOrdersView.total || 0} 条`,
+      isEmpty: true,
     };
   }
 
   return {
     columns,
-    rowsHtml: rows.map(renderOrderRow).join(""),
-    summary: `未成交订单 ${state.openOrdersView.total || rows.length} 条`,
+    rowsHtml: `${visibleRows.map(renderOrderRow).join("")}${renderLoadMoreMarker(visibleRows.length < rows.length)}`,
+    summary: `显示 ${visibleRows.length}/${rows.length} 条未成交订单`,
+    isEmpty: false,
   };
 }
 
 function renderHistoryView() {
-  const columns = ["盘口", "结果", "买入均价", "买入份额", "已结算盈亏", "结算时间"];
+  const columns = ["市场", "方向", "均价", "份额", "结算盈亏", "抓取时间"];
   const rows = filterRows(sortHistory(state.settlementsPage.rows || []));
 
   if (state.settlementsPage.loading && rows.length === 0) {
     return {
       columns,
       rowsHtml: `<div class="empty-state">历史记录加载中。</div>`,
-      summary: "",
+      summary: "历史记录加载中",
+      isEmpty: true,
     };
   }
 
@@ -523,7 +563,8 @@ function renderHistoryView() {
     return {
       columns,
       rowsHtml: `<div class="empty-state tone-negative">${escapeHtml(state.settlementsPage.error)}</div>`,
-      summary: "",
+      summary: "历史记录加载失败",
+      isEmpty: true,
     };
   }
 
@@ -531,15 +572,23 @@ function renderHistoryView() {
     return {
       columns,
       rowsHtml: `<div class="empty-state">当前没有匹配的历史记录。</div>`,
-      summary: "",
+      summary: "暂无历史记录",
+      isEmpty: true,
     };
   }
 
+  const hasMore = state.settlementsPage.page < state.settlementsPage.totalPages;
   return {
     columns,
-    rowsHtml: rows.map(renderHistoryRow).join(""),
-    summary: "",
+    rowsHtml: `${rows.map(renderHistoryRow).join("")}${renderLoadMoreMarker(hasMore || state.settlementsPage.loading)}`,
+    summary: `显示 ${rows.length}/${state.settlementsPage.total || rows.length} 条历史记录 · 第 ${state.settlementsPage.page}/${Math.max(state.settlementsPage.totalPages || 1, 1)} 页`,
+    isEmpty: false,
   };
+}
+
+function renderLoadMoreMarker(visible) {
+  if (!visible) return "";
+  return `<div class="table-load-more">继续向下滚动加载更多</div>`;
 }
 
 function renderPositionRow(row) {
@@ -565,24 +614,26 @@ function renderPositionRow(row) {
 }
 
 function renderHistoryRow(row) {
-  const entryOutcome = pickOutcome(row.outcome, row.oppositeOutcome);
+  const marketSlug = row.marketSlug || row.market_slug || row.asset;
   const settlementOutcome = historySettlementResult(row);
+  const pnl = row.cashPnl ?? row.cash_pnl ?? row.realizedPnl ?? row.realized_pnl ?? "0";
+  const size = row.totalBought ?? row.total_bought ?? row.size ?? "0";
   return `
     <div class="table-row">
       ${renderMarketCell(
-        row.slug,
+        marketSlug,
         formatTime(normalizeEpochMs(row.timestamp), true),
-        marketIconKind(row.slug),
-        toneKey(entryOutcome),
-        row.icon,
-        buildEventUrl(row.slug),
+        marketIconKind(marketSlug),
+        toneKey(settlementOutcome),
+        "",
+        buildEventUrl(marketSlug),
       )}
       <div class="cell-value">
         <span class="outcome-chip ${toneKey(settlementOutcome)}">${escapeHtml(sideLabel(settlementOutcome))}</span>
       </div>
-      <div class="cell-value">${formatQuote(row.avgPrice)}</div>
-      <div class="cell-value">${formatShare(row.totalBought)}<span class="cell-sub">买入份额</span></div>
-      <div class="cell-value ${toneClass(row.realizedPnl)}">${formatMoney(row.realizedPnl)}</div>
+      <div class="cell-value">${formatQuote(row.avgPrice ?? row.avg_price)}</div>
+      <div class="cell-value">${formatShare(size)}<span class="cell-sub">份额</span></div>
+      <div class="cell-value ${toneClass(pnl)}">${formatMoney(pnl)}</div>
       <div class="cell-value">${formatTime(normalizeEpochMs(row.timestamp), true)}</div>
     </div>
   `;
@@ -649,24 +700,26 @@ function buildEventUrl(slug) {
 
 // 历史记录里的“结果”列展示最终结算结果，不展示当时买入方向。
 function historySettlementResult(row) {
-  const curPrice = optionalNumeric(row.curPrice);
+  const outcome = row.outcome;
+  const opposite = oppositeOutcome(outcome);
+  const curPrice = optionalNumeric(row.curPrice ?? row.cur_price);
 
   if (curPrice !== null && curPrice >= 0.999) {
-    return pickOutcome(row.outcome, row.oppositeOutcome);
+    return pickOutcome(outcome, opposite);
   }
   if (curPrice !== null && curPrice <= 0.001) {
-    return pickOutcome(row.oppositeOutcome, row.outcome);
+    return pickOutcome(opposite, outcome);
   }
 
-  const realizedPnl = optionalNumeric(row.realizedPnl);
+  const realizedPnl = optionalNumeric(row.cashPnl ?? row.cash_pnl ?? row.realizedPnl ?? row.realized_pnl);
   if (realizedPnl !== null && realizedPnl < 0) {
-    return pickOutcome(row.oppositeOutcome, row.outcome);
+    return pickOutcome(opposite, outcome);
   }
   if (realizedPnl !== null && realizedPnl > 0) {
-    return pickOutcome(row.outcome, row.oppositeOutcome);
+    return pickOutcome(outcome, opposite);
   }
 
-  return pickOutcome(row.outcome, row.oppositeOutcome);
+  return pickOutcome(outcome, opposite);
 }
 
 function bindEvents() {
@@ -677,6 +730,7 @@ function bindEvents() {
     resetPositionsView();
     resetOpenOrdersView();
     resetSettlementsPage();
+    scrollTableToTop();
     void refreshActiveTab(true);
     render();
   });
@@ -685,6 +739,7 @@ function bindEvents() {
     const button = event.target.closest("[data-tab]");
     if (!button || button.dataset.tab === state.currentTab) return;
     state.currentTab = button.dataset.tab;
+    scrollTableToTop();
     void refreshActiveTab(true);
     renderTabs();
     renderTable();
@@ -692,7 +747,14 @@ function bindEvents() {
 
   nodes.searchInput.addEventListener("input", (event) => {
     state.search = event.target.value.trim().toLowerCase();
+    syncVisibleCountWithSearch();
+    scrollTableToTop();
     renderTable();
+  });
+
+  nodes.tableBody.addEventListener("scroll", () => {
+    if (!shouldLoadMoreOnScroll(nodes.tableBody)) return;
+    void loadMoreRows();
   });
 }
 
@@ -700,14 +762,17 @@ async function refreshActiveTab(forceReload = false) {
   if (!state.selectedStrategy) return;
 
   if (state.currentTab === "history") {
-    if (
-      forceReload ||
-      state.settlementsPage.strategy !== state.selectedStrategy ||
-      state.settlementsPage.range !== HISTORY_RANGE
-    ) {
+    const strategyChanged = state.settlementsPage.strategy !== state.selectedStrategy;
+    const rangeChanged = state.settlementsPage.range !== HISTORY_RANGE;
+    const hasRows = (state.settlementsPage.rows || []).length > 0;
+
+    if (forceReload || strategyChanged || rangeChanged) {
       resetSettlementsPage();
     }
-    await loadClosedPositions();
+    if (!forceReload && !strategyChanged && !rangeChanged && hasRows) {
+      return;
+    }
+    await loadPositionsPage();
     return;
   }
 
@@ -731,11 +796,9 @@ function filterRows(rows) {
     const historyResult = row.timestamp ? historySettlementResult(row) : "";
     const haystack = [
       row.market_slug,
-      row.slug,
-      row.title,
+      row.marketSlug,
       row.outcome,
-      row.oppositeOutcome,
-      ...outcomeSearchTerms(row.outcome, row.oppositeOutcome, historyResult),
+      ...outcomeSearchTerms(row.outcome, historyResult),
       row.asset_id,
       row.asset,
       row.strategy,
@@ -747,6 +810,48 @@ function filterRows(rows) {
       .toLowerCase();
     return haystack.includes(state.search);
   });
+}
+
+function syncVisibleCountWithSearch() {
+  if (state.currentTab === "orders") {
+    state.openOrdersView.visibleCount = PAGE_SIZE;
+    return;
+  }
+  if (state.currentTab === "positions") {
+    state.positionsView.visibleCount = PAGE_SIZE;
+  }
+}
+
+function shouldLoadMoreOnScroll(container) {
+  return container.scrollTop + container.clientHeight >= container.scrollHeight - SCROLL_THRESHOLD_PX;
+}
+
+async function loadMoreRows() {
+  if (state.currentTab === "history") {
+    if (state.settlementsPage.loading) return;
+    if (state.settlementsPage.page >= state.settlementsPage.totalPages) return;
+    await loadPositionsPage({ append: true });
+    return;
+  }
+
+  if (state.currentTab === "orders") {
+    const rows = filterRows(sortOrders(state.openOrdersView.rows || []));
+    if (state.openOrdersView.loading) return;
+    if ((state.openOrdersView.visibleCount || PAGE_SIZE) >= rows.length) return;
+    state.openOrdersView.visibleCount += PAGE_SIZE;
+    renderTable();
+    return;
+  }
+
+  const rows = filterRows(sortPositions(state.positionsView.rows || []));
+  if (state.positionsView.loading) return;
+  if ((state.positionsView.visibleCount || PAGE_SIZE) >= rows.length) return;
+  state.positionsView.visibleCount += PAGE_SIZE;
+  renderTable();
+}
+
+function scrollTableToTop() {
+  nodes.tableBody.scrollTop = 0;
 }
 
 function sortPositions(rows) {
@@ -834,6 +939,13 @@ function pickOutcome(outcome, oppositeOutcome) {
   return outcomeValue(outcome) || outcomeValue(oppositeOutcome) || "unknown";
 }
 
+function oppositeOutcome(outcome) {
+  const normalized = normalizedOutcome(outcome);
+  if (normalized === "yes") return "No";
+  if (normalized === "no") return "Yes";
+  return "";
+}
+
 function optionalNumeric(value) {
   const text = outcomeValue(value);
   return text ? numeric(text) : null;
@@ -885,6 +997,12 @@ function formatShare(value) {
   return numeric(value).toFixed(1);
 }
 
+function formatRate(winCount, totalCount) {
+  const total = numeric(totalCount);
+  if (total <= 0) return "--";
+  return `${((numeric(winCount) / total) * 100).toFixed(1)}%`;
+}
+
 function formatTime(value, compact = false) {
   if (!value) return "暂无";
   const options = compact
@@ -928,5 +1046,5 @@ function escapeAttr(value) {
 
 bindEvents();
 setConnectionStatus("轮询启动中", "degraded");
-void loadSnapshot();
-startSnapshotPolling();
+void loadInfo();
+startInfoPolling();

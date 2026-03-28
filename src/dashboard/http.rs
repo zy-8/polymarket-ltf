@@ -66,10 +66,10 @@ pub async fn route(
         (&Method::GET, "/styles.css") => {
             asset_response(StatusCode::OK, "text/css; charset=utf-8", STYLES_CSS)
         }
-        (&Method::GET, "/api/snapshot") => json_response(StatusCode::OK, &handle.snapshot()),
+        (&Method::GET, "/api/info") => info_response(handle).await,
         (&Method::GET, "/api/positions") => positions_response(&request, handle),
         (&Method::GET, "/api/open-orders") => open_orders_response(&request, handle),
-        (&Method::GET, "/api/closed-positions") => closed_positions_response(&request, handle),
+        (&Method::GET, "/api/positions-page") => positions_page_response(&request, handle).await,
         _ => text_response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
@@ -80,7 +80,7 @@ pub async fn route(
     Ok(response)
 }
 
-fn closed_positions_response(request: &Request<Incoming>, handle: Handle) -> Response<Body> {
+async fn positions_page_response(request: &Request<Incoming>, handle: Handle) -> Response<Body> {
     let Some(strategy) = query_param(request.uri().query(), "strategy") else {
         return text_response(
             StatusCode::BAD_REQUEST,
@@ -92,9 +92,22 @@ fn closed_positions_response(request: &Request<Incoming>, handle: Handle) -> Res
     let page = parse_usize_param(request.uri().query(), "page").unwrap_or(1);
     let page_size = parse_usize_param(request.uri().query(), "page_size").unwrap_or(10);
     let range = query_param(request.uri().query(), "range");
-    let payload = handle.closed_positions_page(strategy, range, page, page_size);
+    let payload = handle
+        .positions_page(strategy, range, page, page_size)
+        .await;
 
     json_response(StatusCode::OK, &payload)
+}
+
+async fn info_response(handle: Handle) -> Response<Body> {
+    match handle.info().await {
+        Ok(payload) => json_response(StatusCode::OK, &payload),
+        Err(error) => text_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "text/plain; charset=utf-8",
+            &format!("dashboard info unavailable: {error}"),
+        ),
+    }
 }
 
 fn positions_response(request: &Request<Incoming>, handle: Handle) -> Response<Body> {

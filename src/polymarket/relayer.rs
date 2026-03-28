@@ -441,36 +441,21 @@ impl RelayerService {
     }
 
     async fn collect_redeemable_condition_ids(&self) -> Result<Vec<FixedBytes<32>>> {
-        let mut offset = 0;
-        let limit = 100;
         let mut condition_ids: std::collections::BTreeSet<FixedBytes<32>> =
             std::collections::BTreeSet::new();
+        let positions = self
+            .context
+            .data_client
+            .positions(
+                &PositionsRequest::builder()
+                    .user(self.context.safe_address)
+                    .redeemable(true)
+                    .build(),
+            )
+            .await?;
 
-        loop {
-            let positions = self
-                .context
-                .data_client
-                .positions(
-                    &PositionsRequest::builder()
-                        .user(self.context.safe_address)
-                        .redeemable(true)
-                        .limit(limit)
-                        .context("redeem positions limit 非法")?
-                        .offset(offset)
-                        .context("redeem positions offset 非法")?
-                        .build(),
-                )
-                .await?;
-            let batch_len = positions.len();
-
-            for p in positions {
-                condition_ids.insert(p.condition_id);
-            }
-
-            if batch_len < limit as usize {
-                break;
-            }
-            offset += limit;
+        for p in positions {
+            condition_ids.insert(p.condition_id);
         }
 
         Ok(condition_ids.into_iter().collect())

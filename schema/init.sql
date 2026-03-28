@@ -24,8 +24,6 @@ CREATE TABLE IF NOT EXISTS trades (
     order_id TEXT,
     -- Polymarket 成交 ID，唯一。
     trade_id TEXT NOT NULL UNIQUE,
-    -- 成交 token 的 asset id。
-    asset_id TEXT NOT NULL,
     -- 账户视角下的成交方向，使用 buy / sell。
     side TEXT NOT NULL,
     -- 成交价格。
@@ -45,6 +43,8 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE TABLE IF NOT EXISTS strategy (
     -- Polymarket 订单 ID；也是和 `orders/trades` 做关联的主键。
     order_id TEXT PRIMARY KEY,
+    -- 下单对应的 Polymarket asset id。
+    asset_id TEXT NOT NULL,
     -- 策略名，例如 `crypto_reversal`。
     strategy TEXT NOT NULL,
     -- 基础资产，例如 btc / eth。
@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS strategy (
     market_slug TEXT NOT NULL,
     -- 策略方向，使用 up / down。
     side TEXT NOT NULL,
+    -- 关联历史盘口最终结算结果，例如 up / down。
+    outcome TEXT NOT NULL,
     -- 本地归因记录写入时间。
     created_at INTEGER NOT NULL,
     -- JSON 事件快照，保存当时的触发内容和策略条件。
@@ -72,3 +74,51 @@ CREATE INDEX IF NOT EXISTS idx_trades_order_id
 -- 成交 ID 是天然唯一键，这里额外建索引是为了显式表达常见查询路径。
 CREATE INDEX IF NOT EXISTS idx_trades_trade_id
     ON trades(trade_id);
+
+-- 策略归因表也会按 asset id 做历史归因和已结算匹配。
+CREATE INDEX IF NOT EXISTS idx_strategy_asset_id
+    ON strategy(asset_id);
+
+-- 已结算查询会反复按 asset_id 找最新一条归因记录。
+CREATE INDEX IF NOT EXISTS idx_strategy_asset_created_order
+    ON strategy(asset_id, created_at DESC, order_id DESC);
+
+-- `positions` 保存官方 redeemable positions 轮询结果的关键字段子集。
+-- 字段按“和运行时 positions 共用的核心状态 + 已结算统计必需字段”收敛；
+-- 不再镜像 title / icon / opposite outcome 等展示冗余字段。
+CREATE TABLE IF NOT EXISTS positions (
+    -- 已结算 token 的 asset id。
+    asset TEXT PRIMARY KEY,
+    -- 归属钱包地址。
+    proxy_wallet TEXT NOT NULL,
+    -- 条件 ID。
+    condition_id TEXT NOT NULL,
+    -- 市场 slug；和运行时 positions 的 `market_slug` 对齐。
+    market_slug TEXT NOT NULL,
+    -- 当前 outcome 名称。
+    outcome TEXT NOT NULL,
+    -- 平均买入价格。
+    avg_price TEXT NOT NULL,
+    -- 当前份额；上游未返回时为空。
+    size TEXT,
+    -- 累计买入数量。
+    total_bought TEXT,
+    -- 当前价值；上游未返回时为空。
+    current_value TEXT,
+    -- 现金盈亏；redeemable positions 的结算统计优先使用该字段。
+    cash_pnl TEXT,
+    -- 已实现盈亏；当 cash_pnl 缺失时作为回退。
+    realized_pnl TEXT NOT NULL,
+    -- 当前价格；结算后通常为 0 或 1。
+    cur_price TEXT NOT NULL,
+    -- 官方返回的结束时间字符串。
+    end_date TEXT NOT NULL,
+    -- 本地抓取 redeemable positions 快照的时间戳（毫秒）。
+    timestamp INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_timestamp
+    ON positions(timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_positions_market_slug
+    ON positions(market_slug);

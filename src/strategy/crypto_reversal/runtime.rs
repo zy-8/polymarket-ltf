@@ -66,13 +66,13 @@ impl DashboardReporter {
     async fn load(&self, store: &Store) -> Result<()> {
         self.handle.load_history(
             &store
-                .load_dashboard_history(DASHBOARD_HISTORY_LIMIT)
+                .select_dashboard_history(DASHBOARD_HISTORY_LIMIT)
                 .await
                 .map_err(anyhow::Error::from)?,
         );
         self.handle.load_strategy_attribution(
             &store
-                .load_strategy_attribution()
+                .select_strategy_attribution()
                 .await
                 .map_err(anyhow::Error::from)?,
         );
@@ -85,7 +85,7 @@ impl DashboardReporter {
         positions: &[crate::polymarket::types::positions::Position],
     ) {
         self.handle.polymarket_status("connected");
-        self.push_user_state(open_orders, positions);
+        self.handle.user_state(open_orders, positions);
     }
 
     fn connect_binance(&self) {
@@ -97,7 +97,7 @@ impl DashboardReporter {
         open_orders: &[crate::polymarket::types::open_orders::Order],
         positions: &[crate::polymarket::types::positions::Position],
     ) {
-        self.push_user_state(open_orders, positions);
+        self.handle.user_state(open_orders, positions);
     }
 
     fn signal(&self, candidate: &service::Candidate) {
@@ -118,14 +118,6 @@ impl DashboardReporter {
     fn scan(&self) {
         self.handle.scan(constants::STRATEGY_NAME);
     }
-
-    fn push_user_state(
-        &self,
-        open_orders: &[crate::polymarket::types::open_orders::Order],
-        positions: &[crate::polymarket::types::positions::Position],
-    ) {
-        self.handle.user_state(open_orders, positions);
-    }
 }
 
 impl EventSink for DashboardReporter {
@@ -138,7 +130,7 @@ impl EventSink for DashboardReporter {
         open_orders: &[crate::polymarket::types::open_orders::Order],
         positions: &[crate::polymarket::types::positions::Position],
     ) {
-        self.push_user_state(open_orders, positions);
+        self.handle.user_state(open_orders, positions);
     }
 
     fn error(&self, message: String) {
@@ -160,7 +152,7 @@ pub async fn run(
     context: StrategyContext,
 ) -> Result<()> {
     ensure_parent_dir(&app.runtime.sqlite_path)?;
-    let reporter = Arc::new(DashboardReporter::new(dashboard));
+    let reporter = Arc::new(DashboardReporter::new(dashboard.clone()));
     reporter.status("starting");
 
     let StrategyContext {
@@ -170,11 +162,11 @@ pub async fn run(
         gamma_client,
         data_client: _,
         safe_address: _,
+        store,
+        ..
     } = context;
 
-    let store = Store::open(&app.runtime.sqlite_path)
-        .await
-        .map_err(anyhow::Error::from)?;
+    dashboard.attach_store(store.clone());
     reporter.load(&store).await?;
     let user = Arc::new(
         UserClient::start_with_store(&client, Some(store.clone()), Some(reporter.clone()))

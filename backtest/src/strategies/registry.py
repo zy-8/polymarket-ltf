@@ -105,7 +105,7 @@ def add_strategy_parameter_args(
     parser.add_argument(
         "--entry-z",
         default="1.5",
-        help="Open long below -entry_z, open short above +entry_z",
+        help="Open up below -entry_z, open down above +entry_z",
     )
     parser.add_argument(
         "--exit-z",

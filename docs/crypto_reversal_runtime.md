@@ -353,7 +353,7 @@ flowchart TD
 
 - `5m` 策略的背景过滤需要 `15m` 已收盘 candles
 
-这一逻辑在 [service.rs](../src/strategy/crypto_reversal/service.rs) 的 `collect_input_klines`。
+这一逻辑在 [service.rs](../src/strategy/crypto_reversal/service.rs) 的 `subscribe_inputs` 和内部 `build_inputs`。
 
 ## 8. 信号模型
 

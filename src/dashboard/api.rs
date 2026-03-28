@@ -4,53 +4,92 @@ use std::sync::{Arc, RwLock};
 use crate::events;
 use crate::polymarket::types::open_orders::Order as OpenOrder;
 use crate::polymarket::types::positions::Position;
-use crate::polymarket::user_task::ClosedPositionsCache;
-use crate::storage::sqlite::DashboardHistory;
+use crate::storage::sqlite::{DashboardHistory, InfoStats, PositionRecord, Store};
 use crate::strategy::crypto_reversal::model::Side;
 use crate::strategy::crypto_reversal::service::Candidate;
 use crate::types::crypto::Symbol;
 use chrono::{NaiveDate, Utc};
-use polymarket_client_sdk::data::types::response::ClosedPosition;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SnapshotPayload {
-    pub account: AccountSnapshot,
-    pub strategies: Vec<StrategySnapshot>,
+pub struct InfoPayload {
+    pub account: AccountInfo,
+    pub strategies: Vec<StrategyInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AccountSnapshot {
+pub struct AccountInfo {
     pub runtime_status: String,
     pub binance_ws_status: String,
     pub polymarket_ws_status: String,
     pub server_time_ms: i64,
     pub open_order_count: usize,
     pub position_count: usize,
+    pub trigger_count: usize,
+    pub closed_count: usize,
+    pub today_closed_count: usize,
+    pub closed_win_count: usize,
+    pub closed_loss_count: usize,
+    pub missed_count: usize,
+    pub missed_win_count: usize,
+    pub missed_loss_count: usize,
     pub today_order_count: usize,
     pub today_trade_count: usize,
-    pub today_notional_usdc: String,
-    pub settled_count: usize,
+    pub today_closed_pnl_usdc: String,
     pub settled_pnl_usdc: String,
     pub last_error: Option<String>,
 }
 
+impl AccountInfo {
+    fn starting() -> Self {
+        Self {
+            runtime_status: "starting".to_string(),
+            binance_ws_status: "connecting".to_string(),
+            polymarket_ws_status: "connecting".to_string(),
+            server_time_ms: Utc::now().timestamp_millis(),
+            open_order_count: 0,
+            position_count: 0,
+            trigger_count: 0,
+            closed_count: 0,
+            today_closed_count: 0,
+            closed_win_count: 0,
+            closed_loss_count: 0,
+            missed_count: 0,
+            missed_win_count: 0,
+            missed_loss_count: 0,
+            today_order_count: 0,
+            today_trade_count: 0,
+            today_closed_pnl_usdc: "0".to_string(),
+            settled_pnl_usdc: "0".to_string(),
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
-pub struct StrategySnapshot {
+pub struct StrategyInfo {
     pub strategy: String,
     pub status: String,
+    pub outcome: String,
     pub last_scan_ms: Option<i64>,
     pub last_signal_ms: Option<i64>,
     pub last_order_ms: Option<i64>,
     pub last_trade_ms: Option<i64>,
     pub open_order_count: usize,
     pub position_count: usize,
+    pub trigger_count: usize,
+    pub closed_count: usize,
+    pub today_closed_count: usize,
+    pub closed_win_count: usize,
+    pub closed_loss_count: usize,
+    pub missed_count: usize,
+    pub missed_win_count: usize,
+    pub missed_loss_count: usize,
     pub today_order_count: usize,
     pub today_trade_count: usize,
-    pub today_notional_usdc: String,
-    pub settled_count: usize,
+    pub today_closed_pnl_usdc: String,
     pub settled_pnl_usdc: String,
     pub last_error: Option<String>,
     pub latest_signal: Option<SignalPayload>,
@@ -101,88 +140,63 @@ pub struct PositionPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SettlementPayload {
+pub struct RedeemablePositionPayload {
     #[serde(flatten)]
-    pub raw: RawClosedPositionPayload,
-    #[serde(skip_serializing)]
-    pub asset_id: String,
-    #[serde(skip_serializing)]
-    pub market_slug: String,
-    #[serde(skip_serializing)]
-    pub avg_price: String,
-    #[serde(skip_serializing)]
-    pub total_bought: String,
-    #[serde(skip_serializing)]
-    pub realized_pnl: String,
-    #[serde(skip_serializing)]
-    pub closed_at_ms: i64,
+    pub raw: RawPositionPayload,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RawClosedPositionPayload {
+pub struct RawPositionPayload {
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: String,
     pub asset: String,
     #[serde(rename = "conditionId")]
     pub condition_id: String,
+    #[serde(rename = "marketSlug")]
+    pub market_slug: String,
+    pub outcome: String,
     #[serde(rename = "avgPrice")]
     pub avg_price: String,
-    #[serde(rename = "totalBought")]
-    pub total_bought: String,
+    #[serde(rename = "size", skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(rename = "totalBought", skip_serializing_if = "Option::is_none")]
+    pub total_bought: Option<String>,
+    #[serde(rename = "currentValue", skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<String>,
+    #[serde(rename = "cashPnl", skip_serializing_if = "Option::is_none")]
+    pub cash_pnl: Option<String>,
     #[serde(rename = "realizedPnl")]
     pub realized_pnl: String,
     #[serde(rename = "curPrice")]
     pub cur_price: String,
-    pub title: String,
-    pub slug: String,
-    pub icon: String,
-    #[serde(rename = "eventSlug")]
-    pub event_slug: String,
-    pub outcome: String,
-    #[serde(rename = "outcomeIndex")]
-    pub outcome_index: i32,
-    #[serde(rename = "oppositeOutcome")]
-    pub opposite_outcome: String,
-    #[serde(rename = "oppositeAsset")]
-    pub opposite_asset: String,
     #[serde(rename = "endDate")]
     pub end_date: String,
     pub timestamp: i64,
 }
 
-impl RawClosedPositionPayload {
-    fn from_closed(closed: &ClosedPosition) -> Self {
-        Self {
-            proxy_wallet: closed.proxy_wallet.to_string(),
-            asset: closed.asset.to_string(),
-            condition_id: closed.condition_id.to_string(),
-            avg_price: closed.avg_price.normalize().to_string(),
-            total_bought: closed.total_bought.normalize().to_string(),
-            realized_pnl: closed.realized_pnl.normalize().to_string(),
-            cur_price: closed.cur_price.normalize().to_string(),
-            title: closed.title.clone(),
-            slug: closed.slug.clone(),
-            icon: closed.icon.clone(),
-            event_slug: closed.event_slug.clone(),
-            outcome: closed.outcome.clone(),
-            outcome_index: closed.outcome_index,
-            opposite_outcome: closed.opposite_outcome.clone(),
-            opposite_asset: closed.opposite_asset.to_string(),
-            end_date: closed.end_date.to_rfc3339(),
-            timestamp: closed.timestamp,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
-pub struct ClosedPositionsPagePayload {
+pub struct PositionsPagePayload {
     pub strategy: String,
     pub range: String,
     pub page: usize,
     pub page_size: usize,
     pub total: usize,
     pub total_pages: usize,
-    pub rows: Vec<SettlementPayload>,
+    pub rows: Vec<RedeemablePositionPayload>,
+}
+
+impl PositionsPagePayload {
+    fn empty(strategy: &str, range: &str, page_size: usize) -> Self {
+        Self {
+            strategy: strategy.to_string(),
+            range: range.to_string(),
+            page: 1,
+            page_size,
+            total: 0,
+            total_pages: 0,
+            rows: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,11 +206,31 @@ pub struct PositionsPayload {
     pub rows: Vec<PositionPayload>,
 }
 
+impl PositionsPayload {
+    fn empty(strategy: &str) -> Self {
+        Self {
+            strategy: strategy.to_string(),
+            total: 0,
+            rows: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenOrdersPayload {
     pub strategy: String,
     pub total: usize,
     pub rows: Vec<OrderPayload>,
+}
+
+impl OpenOrdersPayload {
+    fn empty(strategy: &str) -> Self {
+        Self {
+            strategy: strategy.to_string(),
+            total: 0,
+            rows: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +243,7 @@ struct OrderMeta {
 
 #[derive(Debug, Clone)]
 struct StrategyState {
-    snapshot: StrategySnapshot,
+    info: StrategyInfo,
     open_orders: Vec<OrderPayload>,
     positions: Vec<PositionPayload>,
 }
@@ -217,19 +251,27 @@ struct StrategyState {
 impl StrategyState {
     fn new(strategy: &str) -> Self {
         Self {
-            snapshot: StrategySnapshot {
+            info: StrategyInfo {
                 strategy: strategy.to_string(),
                 status: "starting".to_string(),
+                outcome: String::new(),
                 last_scan_ms: None,
                 last_signal_ms: None,
                 last_order_ms: None,
                 last_trade_ms: None,
                 open_order_count: 0,
                 position_count: 0,
+                trigger_count: 0,
+                closed_count: 0,
+                today_closed_count: 0,
+                closed_win_count: 0,
+                closed_loss_count: 0,
+                missed_count: 0,
+                missed_win_count: 0,
+                missed_loss_count: 0,
                 today_order_count: 0,
                 today_trade_count: 0,
-                today_notional_usdc: "0".to_string(),
-                settled_count: 0,
+                today_closed_pnl_usdc: "0".to_string(),
                 settled_pnl_usdc: "0".to_string(),
                 last_error: None,
                 latest_signal: None,
@@ -243,35 +285,20 @@ impl StrategyState {
 #[derive(Debug, Clone)]
 struct InnerState {
     day: NaiveDate,
-    account: AccountSnapshot,
+    account: AccountInfo,
     strategies: BTreeMap<String, StrategyState>,
     order_meta: HashMap<String, OrderMeta>,
     asset_meta: HashMap<String, OrderMeta>,
-    market_strategy: HashMap<String, String>,
 }
 
 impl InnerState {
     fn new() -> Self {
         Self {
             day: Utc::now().date_naive(),
-            account: AccountSnapshot {
-                runtime_status: "starting".to_string(),
-                binance_ws_status: "connecting".to_string(),
-                polymarket_ws_status: "connecting".to_string(),
-                server_time_ms: Utc::now().timestamp_millis(),
-                open_order_count: 0,
-                position_count: 0,
-                today_order_count: 0,
-                today_trade_count: 0,
-                today_notional_usdc: "0".to_string(),
-                settled_count: 0,
-                settled_pnl_usdc: "0".to_string(),
-                last_error: None,
-            },
+            account: AccountInfo::starting(),
             strategies: BTreeMap::new(),
             order_meta: HashMap::new(),
             asset_meta: HashMap::new(),
-            market_strategy: HashMap::new(),
         }
     }
 
@@ -290,44 +317,84 @@ impl InnerState {
         self.day = today;
         self.account.today_order_count = 0;
         self.account.today_trade_count = 0;
-        self.account.today_notional_usdc = "0".to_string();
+        self.account.today_closed_pnl_usdc = "0".to_string();
 
         for strategy in self.strategies.values_mut() {
-            strategy.snapshot.today_order_count = 0;
-            strategy.snapshot.today_trade_count = 0;
-            strategy.snapshot.today_notional_usdc = "0".to_string();
+            strategy.info.today_order_count = 0;
+            strategy.info.today_trade_count = 0;
+            strategy.info.today_closed_pnl_usdc = "0".to_string();
         }
     }
 
     fn register_order_meta(&mut self, order_id: &str, meta: OrderMeta) {
-        self.market_strategy
-            .insert(meta.market_slug.clone(), meta.strategy.clone());
         self.order_meta.insert(order_id.to_string(), meta);
+    }
+
+    fn register_strategy_meta(&mut self, strategy: &events::Strategy) {
+        let meta = OrderMeta {
+            strategy: strategy.strategy.clone(),
+            market_slug: strategy.market_slug.clone(),
+            side: strategy.side.clone(),
+            created_at_ms: Some(strategy.created_at),
+        };
+        self.register_order_meta(&strategy.order_id, meta.clone());
+        self.asset_meta.insert(strategy.asset_id.clone(), meta);
     }
 }
 
 #[derive(Clone)]
 pub struct Handle {
     state: Arc<RwLock<InnerState>>,
-    closed_positions_cache: Arc<RwLock<Option<ClosedPositionsCache>>>,
+    store: Arc<RwLock<Option<Store>>>,
 }
 
 impl Handle {
     pub fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(InnerState::new())),
-            closed_positions_cache: Arc::new(RwLock::new(None)),
+            store: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub fn attach_closed_positions_cache(&self, cache: ClosedPositionsCache) {
-        if let Ok(mut guard) = self.closed_positions_cache.write() {
-            *guard = Some(cache);
+    pub fn attach_store(&self, store: Store) {
+        if let Ok(mut guard) = self.store.write() {
+            *guard = Some(store);
         }
     }
 
-    pub fn snapshot(&self) -> SnapshotPayload {
-        self.snapshot_payload()
+    fn store(&self) -> Option<Store> {
+        self.store.read().ok().and_then(|guard| guard.clone())
+    }
+
+    pub async fn info(&self) -> crate::errors::Result<InfoPayload> {
+        let (mut account, mut strategies) = {
+            let state = self.state.read().map_err(|_| {
+                crate::errors::PolyfillError::internal_simple("dashboard state lock poisoned")
+            })?;
+
+            let mut account = state.account.clone();
+            account.server_time_ms = now_ms();
+
+            let strategies: Vec<_> = state
+                .strategies
+                .values()
+                .map(|strategy| strategy.info.clone())
+                .collect();
+
+            (account, strategies)
+        };
+
+        if let Some(store) = self.store() {
+            if let Ok(stats) = store.select_info_stats().await {
+                apply_info_stats(&mut account, &mut strategies, &stats);
+            }
+        }
+        strategies.sort_by_key(|strategy| std::cmp::Reverse(strategy_latest_time(strategy)));
+
+        Ok(InfoPayload {
+            account,
+            strategies,
+        })
     }
 
     pub fn register_strategy(&self, strategy: &str) {
@@ -358,14 +425,14 @@ impl Handle {
 
     pub fn scan(&self, strategy: &str) {
         if let Ok(mut state) = self.state.write() {
-            state.ensure_strategy(strategy).snapshot.last_scan_ms = Some(now_ms());
+            state.ensure_strategy(strategy).info.last_scan_ms = Some(now_ms());
         }
     }
 
     pub fn strategy_status(&self, strategy: &str, status: &str) {
         if let Ok(mut state) = self.state.write() {
-            let snapshot = &mut state.ensure_strategy(strategy).snapshot;
-            snapshot.status = status.to_string();
+            let info = &mut state.ensure_strategy(strategy).info;
+            info.status = status.to_string();
         }
     }
 
@@ -409,22 +476,22 @@ impl Handle {
         }
 
         for strategy in state.strategies.values_mut() {
-            strategy.snapshot.open_order_count = strategy_open_orders
-                .get(&strategy.snapshot.strategy)
+            strategy.info.open_order_count = strategy_open_orders
+                .get(&strategy.info.strategy)
                 .copied()
                 .unwrap_or_default();
             let mut open_orders = strategy_open_order_rows
-                .remove(&strategy.snapshot.strategy)
+                .remove(&strategy.info.strategy)
                 .unwrap_or_default();
             open_orders.sort_by_key(|order| std::cmp::Reverse(order.created_at_ms));
             strategy.open_orders = open_orders;
             let mut positions = strategy_positions
-                .remove(&strategy.snapshot.strategy)
+                .remove(&strategy.info.strategy)
                 .unwrap_or_default();
             let position_count = positions.len();
             positions
                 .sort_by_key(|position| std::cmp::Reverse(position.last_trade_ms.unwrap_or(0)));
-            strategy.snapshot.position_count = position_count;
+            strategy.info.position_count = position_count;
             strategy.positions = positions;
         }
     }
@@ -436,9 +503,9 @@ impl Handle {
         };
 
         state.maybe_reset_day();
-        let snapshot = &mut state.ensure_strategy(strategy).snapshot;
-        snapshot.last_signal_ms = Some(now_ms());
-        snapshot.latest_signal = Some(signal);
+        let info = &mut state.ensure_strategy(strategy).info;
+        info.last_signal_ms = Some(now_ms());
+        info.latest_signal = Some(signal);
     }
 
     pub fn order_submission(
@@ -477,8 +544,8 @@ impl Handle {
         state.account.today_order_count += 1;
 
         let strategy_state = state.ensure_strategy(strategy);
-        strategy_state.snapshot.last_order_ms = Some(order.created_at_ms);
-        strategy_state.snapshot.today_order_count += 1;
+        strategy_state.info.last_order_ms = Some(order.created_at_ms);
+        strategy_state.info.today_order_count += 1;
     }
 
     pub fn order(&self, order: &events::Order) {
@@ -492,7 +559,7 @@ impl Handle {
         };
 
         let strategy = state.ensure_strategy(&meta.strategy);
-        strategy.snapshot.last_order_ms = Some(order.created_at);
+        strategy.info.last_order_ms = Some(order.created_at);
     }
 
     pub fn trade(&self, trade: &events::Trade) {
@@ -510,22 +577,15 @@ impl Handle {
         state.account.today_trade_count += 1;
         let notional = trade.price * trade.size;
         let next_account_notional =
-            add_decimal_string(&state.account.today_notional_usdc, notional);
-        state.account.today_notional_usdc = next_account_notional;
+            add_decimal_string(&state.account.today_closed_pnl_usdc, notional);
+        state.account.today_closed_pnl_usdc = next_account_notional;
 
         if let Some(meta) = strategy_meta {
-            state
-                .asset_meta
-                .insert(trade.asset_id.clone(), meta.clone());
-            state
-                .market_strategy
-                .entry(meta.market_slug.clone())
-                .or_insert_with(|| meta.strategy.clone());
             let strategy = state.ensure_strategy(&meta.strategy);
-            strategy.snapshot.last_trade_ms = Some(trade.event_time.unwrap_or(trade.created_at));
-            strategy.snapshot.today_trade_count += 1;
-            strategy.snapshot.today_notional_usdc =
-                add_decimal_string(&strategy.snapshot.today_notional_usdc, notional);
+            strategy.info.last_trade_ms = Some(trade.event_time.unwrap_or(trade.created_at));
+            strategy.info.today_trade_count += 1;
+            strategy.info.today_closed_pnl_usdc =
+                add_decimal_string(&strategy.info.today_closed_pnl_usdc, notional);
         }
     }
 
@@ -539,8 +599,8 @@ impl Handle {
         state.account.runtime_status = "degraded".to_string();
         if let Some(name) = strategy {
             let strategy = state.ensure_strategy(name);
-            strategy.snapshot.last_error = Some(message);
-            strategy.snapshot.status = "degraded".to_string();
+            strategy.info.last_error = Some(message);
+            strategy.info.status = "degraded".to_string();
         }
     }
 
@@ -552,15 +612,7 @@ impl Handle {
         state.maybe_reset_day();
 
         for strategy in history.strategies.iter().rev() {
-            state.register_order_meta(
-                &strategy.order_id,
-                OrderMeta {
-                    strategy: strategy.strategy.clone(),
-                    market_slug: strategy.market_slug.clone(),
-                    side: strategy.side.clone(),
-                    created_at_ms: Some(strategy.created_at),
-                },
-            );
+            state.register_strategy_meta(strategy);
 
             let signal_time_ms = extract_signal_time_ms(strategy).unwrap_or(strategy.created_at);
             let latest_signal = parse_strategy_signal(strategy);
@@ -570,25 +622,25 @@ impl Handle {
                 state.account.today_order_count += 1;
             }
 
-            let snapshot = &mut state.ensure_strategy(&strategy.strategy).snapshot;
-            snapshot.last_order_ms = Some(
-                snapshot
-                    .last_order_ms
+            let info = &mut state.ensure_strategy(&strategy.strategy).info;
+            info.outcome = strategy.outcome.clone();
+            info.last_order_ms = Some(
+                info.last_order_ms
                     .unwrap_or(strategy.created_at)
                     .max(strategy.created_at),
             );
             if today {
-                snapshot.today_order_count += 1;
+                info.today_order_count += 1;
             }
 
-            let current_signal_time = snapshot
+            let current_signal_time = info
                 .latest_signal
                 .as_ref()
                 .map(|signal| signal.signal_time_ms)
                 .unwrap_or(i64::MIN);
             if current_signal_time < signal_time_ms {
-                snapshot.latest_signal = latest_signal;
-                snapshot.last_signal_ms = Some(signal_time_ms);
+                info.latest_signal = latest_signal;
+                info.last_signal_ms = Some(signal_time_ms);
             }
         }
 
@@ -608,27 +660,23 @@ impl Handle {
 
             if today {
                 state.account.today_trade_count += 1;
-                state.account.today_notional_usdc =
-                    add_decimal_string(&state.account.today_notional_usdc, notional);
+                state.account.today_closed_pnl_usdc =
+                    add_decimal_string(&state.account.today_closed_pnl_usdc, notional);
             }
 
-            state
-                .asset_meta
-                .insert(trade.asset_id.clone(), meta.clone());
-
             let strategy = state.ensure_strategy(&meta.strategy);
-            strategy.snapshot.last_trade_ms = Some(
+            strategy.info.last_trade_ms = Some(
                 strategy
-                    .snapshot
+                    .info
                     .last_trade_ms
                     .unwrap_or(trade_time)
                     .max(trade_time),
             );
 
             if today {
-                strategy.snapshot.today_trade_count += 1;
-                strategy.snapshot.today_notional_usdc =
-                    add_decimal_string(&strategy.snapshot.today_notional_usdc, notional);
+                strategy.info.today_trade_count += 1;
+                strategy.info.today_closed_pnl_usdc =
+                    add_decimal_string(&strategy.info.today_closed_pnl_usdc, notional);
             }
         }
     }
@@ -639,33 +687,18 @@ impl Handle {
         };
 
         for strategy in strategies.iter().rev() {
-            state.register_order_meta(
-                &strategy.order_id,
-                OrderMeta {
-                    strategy: strategy.strategy.clone(),
-                    market_slug: strategy.market_slug.clone(),
-                    side: strategy.side.clone(),
-                    created_at_ms: Some(strategy.created_at),
-                },
-            );
+            state.register_strategy_meta(strategy);
+            state.ensure_strategy(&strategy.strategy).info.outcome = strategy.outcome.clone();
         }
     }
 
     pub fn positions(&self, strategy: &str) -> PositionsPayload {
         let Ok(state) = self.state.read() else {
-            return PositionsPayload {
-                strategy: strategy.to_string(),
-                total: 0,
-                rows: Vec::new(),
-            };
+            return PositionsPayload::empty(strategy);
         };
 
         let Some(strategy_state) = state.strategies.get(strategy) else {
-            return PositionsPayload {
-                strategy: strategy.to_string(),
-                total: 0,
-                rows: Vec::new(),
-            };
+            return PositionsPayload::empty(strategy);
         };
 
         PositionsPayload {
@@ -677,19 +710,11 @@ impl Handle {
 
     pub fn open_orders(&self, strategy: &str) -> OpenOrdersPayload {
         let Ok(state) = self.state.read() else {
-            return OpenOrdersPayload {
-                strategy: strategy.to_string(),
-                total: 0,
-                rows: Vec::new(),
-            };
+            return OpenOrdersPayload::empty(strategy);
         };
 
         let Some(strategy_state) = state.strategies.get(strategy) else {
-            return OpenOrdersPayload {
-                strategy: strategy.to_string(),
-                total: 0,
-                rows: Vec::new(),
-            };
+            return OpenOrdersPayload::empty(strategy);
         };
 
         OpenOrdersPayload {
@@ -699,150 +724,100 @@ impl Handle {
         }
     }
 
-    pub fn closed_positions_page(
+    pub async fn positions_page(
         &self,
         strategy: &str,
         range: Option<&str>,
         page: usize,
         page_size: usize,
-    ) -> ClosedPositionsPagePayload {
+    ) -> PositionsPagePayload {
         let safe_page_size = page_size.clamp(1, 100);
         let safe_page = page.max(1);
         let safe_range = normalize_range(range);
 
-        let Ok(state) = self.state.read() else {
-            return ClosedPositionsPagePayload {
-                strategy: strategy.to_string(),
-                range: safe_range.to_string(),
-                page: 1,
-                page_size: safe_page_size,
-                total: 0,
-                total_pages: 0,
-                rows: Vec::new(),
+        let strategy_exists = {
+            let Ok(state) = self.state.read() else {
+                return PositionsPagePayload::empty(strategy, safe_range, safe_page_size);
             };
+
+            state.strategies.contains_key(strategy)
         };
 
-        let Some(_) = state.strategies.get(strategy) else {
-            return ClosedPositionsPagePayload {
-                strategy: strategy.to_string(),
-                range: safe_range.to_string(),
-                page: 1,
-                page_size: safe_page_size,
-                total: 0,
-                total_pages: 0,
-                rows: Vec::new(),
-            };
-        };
-
-        let rows_source = self
-            .closed_positions_snapshot()
-            .and_then(|closed_positions| closed_positions_rows(&state, strategy, &closed_positions))
-            .unwrap_or_default();
-        let rows = filter_closed_positions(&rows_source, safe_range);
-        let total = rows.len();
-        let total_pages = total.div_ceil(safe_page_size);
-        let page = if total_pages == 0 {
-            1
-        } else {
-            safe_page.min(total_pages)
-        };
-        let start = (page - 1) * safe_page_size;
-        let end = total.min(start + safe_page_size);
-        let rows = if start >= total {
-            Vec::new()
-        } else {
-            rows[start..end].to_vec()
-        };
-
-        ClosedPositionsPagePayload {
-            strategy: strategy.to_string(),
-            range: safe_range.to_string(),
-            page,
-            page_size: safe_page_size,
-            total,
-            total_pages,
-            rows,
+        if !strategy_exists {
+            return PositionsPagePayload::empty(strategy, safe_range, safe_page_size);
         }
-    }
 
-    fn snapshot_payload(&self) -> SnapshotPayload {
-        let Ok(state) = self.state.read() else {
-            return SnapshotPayload {
-                account: AccountSnapshot {
-                    runtime_status: "degraded".to_string(),
-                    binance_ws_status: "disconnected".to_string(),
-                    polymarket_ws_status: "disconnected".to_string(),
-                    server_time_ms: now_ms(),
-                    open_order_count: 0,
-                    position_count: 0,
-                    today_order_count: 0,
-                    today_trade_count: 0,
-                    today_notional_usdc: "0".to_string(),
-                    settled_count: 0,
-                    settled_pnl_usdc: "0".to_string(),
-                    last_error: Some("dashboard state lock poisoned".to_string()),
-                },
-                strategies: Vec::new(),
-            };
+        let Some(store) = self.store() else {
+            return PositionsPagePayload::empty(strategy, safe_range, safe_page_size);
         };
 
-        let mut account = state.account.clone();
-        account.server_time_ms = now_ms();
+        let Ok(page_data) = store
+            .select_positions_page(strategy, safe_range, safe_page, safe_page_size)
+            .await
+        else {
+            return PositionsPagePayload::empty(strategy, safe_range, safe_page_size);
+        };
 
-        let mut strategies: Vec<_> = state
-            .strategies
-            .values()
-            .map(|strategy| strategy.snapshot.clone())
-            .collect();
-
-        if let Some(closed_positions) = self.closed_positions_snapshot() {
-            let settlements = settlement_summary_by_strategy(&state, &closed_positions);
-            account.settled_count = settlements.values().map(|rows| rows.len()).sum();
-            account.settled_pnl_usdc = settlements
-                .values()
-                .flat_map(|rows| rows.iter())
-                .fold(Decimal::ZERO, |acc, row| {
-                    acc + parse_decimal(&row.realized_pnl)
-                })
-                .round_dp(4)
-                .normalize()
-                .to_string();
-
-            for strategy in &mut strategies {
-                let rows = settlements
-                    .get(&strategy.strategy)
-                    .cloned()
-                    .unwrap_or_default();
-                strategy.settled_count = rows.len();
-                strategy.settled_pnl_usdc = rows
-                    .iter()
-                    .fold(Decimal::ZERO, |acc, row| {
-                        acc + parse_decimal(&row.realized_pnl)
-                    })
-                    .round_dp(4)
-                    .normalize()
-                    .to_string();
-            }
+        PositionsPagePayload {
+            strategy: page_data.strategy,
+            range: page_data.range,
+            page: page_data.page,
+            page_size: page_data.page_size,
+            total: page_data.total,
+            total_pages: page_data.total_pages,
+            rows: page_data
+                .rows
+                .into_iter()
+                .map(position_settlement_payload)
+                .collect(),
         }
-        strategies.sort_by_key(|strategy| std::cmp::Reverse(strategy_latest_time(strategy)));
-
-        SnapshotPayload {
-            account,
-            strategies,
-        }
-    }
-
-    fn closed_positions_snapshot(&self) -> Option<Vec<ClosedPosition>> {
-        self.closed_positions_cache
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().cloned())
-            .map(|cache| cache.snapshot())
     }
 }
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+fn apply_info_stats(account: &mut AccountInfo, strategies: &mut [StrategyInfo], stats: &InfoStats) {
+    let strategy_stats = stats
+        .strategies
+        .iter()
+        .map(|stats| (stats.strategy.as_str(), stats))
+        .collect::<HashMap<_, _>>();
+
+    account.trigger_count = stats.trigger_count;
+    account.closed_count = stats.closed_count;
+    account.today_closed_count = stats.today_closed_count;
+    account.today_closed_pnl_usdc = stats.today_closed_pnl_usdc.clone();
+    account.closed_win_count = stats.closed_win_count;
+    account.closed_loss_count = stats.closed_loss_count;
+    account.missed_count = stats.missed_count;
+    account.missed_win_count = stats.missed_win_count;
+    account.missed_loss_count = stats.missed_loss_count;
+    account.settled_pnl_usdc = stats
+        .strategies
+        .iter()
+        .fold(Decimal::ZERO, |acc, item| {
+            acc + parse_decimal(&item.settled_pnl_usdc)
+        })
+        .round_dp(4)
+        .normalize()
+        .to_string();
+
+    for strategy in strategies {
+        if let Some(current) = strategy_stats.get(strategy.strategy.as_str()) {
+            strategy.trigger_count = current.trigger_count;
+            strategy.closed_count = current.closed_count;
+            strategy.today_closed_count = current.today_closed_count;
+            strategy.today_closed_pnl_usdc = current.today_closed_pnl_usdc.clone();
+            strategy.closed_win_count = current.closed_win_count;
+            strategy.closed_loss_count = current.closed_loss_count;
+            strategy.missed_count = current.missed_count;
+            strategy.missed_win_count = current.missed_win_count;
+            strategy.missed_loss_count = current.missed_loss_count;
+            strategy.settled_pnl_usdc = current.settled_pnl_usdc.clone();
+        }
+    }
 }
 
 fn normalize_range(range: Option<&str>) -> &'static str {
@@ -852,68 +827,6 @@ fn normalize_range(range: Option<&str>) -> &'static str {
         "1m" => "1m",
         _ => "all",
     }
-}
-
-fn filter_closed_positions(rows: &[SettlementPayload], range: &str) -> Vec<SettlementPayload> {
-    let Some(min_closed_at_ms) = range_start_ms(range) else {
-        return rows.to_vec();
-    };
-
-    rows.iter()
-        .filter(|row| row.closed_at_ms >= min_closed_at_ms)
-        .cloned()
-        .collect()
-}
-
-fn settlement_summary_by_strategy(
-    state: &InnerState,
-    closed_positions: &[ClosedPosition],
-) -> HashMap<String, Vec<SettlementPayload>> {
-    let mut grouped = HashMap::<String, Vec<SettlementPayload>>::new();
-
-    for closed in closed_positions {
-        let strategy_name = state
-            .asset_meta
-            .get(&closed.asset.to_string())
-            .map(|meta| meta.strategy.clone())
-            .or_else(|| state.market_strategy.get(&closed.slug).cloned());
-
-        let Some(strategy_name) = strategy_name else {
-            continue;
-        };
-
-        grouped
-            .entry(strategy_name)
-            .or_default()
-            .push(settlement_payload(closed));
-    }
-
-    for rows in grouped.values_mut() {
-        rows.sort_by_key(|row| std::cmp::Reverse(row.closed_at_ms));
-    }
-
-    grouped
-}
-
-fn closed_positions_rows(
-    state: &InnerState,
-    strategy: &str,
-    closed_positions: &[ClosedPosition],
-) -> Option<Vec<SettlementPayload>> {
-    let mut grouped = settlement_summary_by_strategy(state, closed_positions);
-    grouped.remove(strategy)
-}
-
-fn range_start_ms(range: &str) -> Option<i64> {
-    let now = Utc::now();
-    let start = match range {
-        "1d" => now - chrono::Duration::days(1),
-        "1w" => now - chrono::Duration::weeks(1),
-        "1m" => now - chrono::Duration::days(30),
-        _ => return None,
-    };
-
-    Some(start.timestamp_millis())
 }
 
 fn signal_payload(candidate: &Candidate) -> SignalPayload {
@@ -961,23 +874,24 @@ fn position_payload(position: &Position, market_slug: Option<&str>) -> PositionP
     }
 }
 
-fn settlement_payload(closed: &ClosedPosition) -> SettlementPayload {
-    SettlementPayload {
-        raw: RawClosedPositionPayload::from_closed(closed),
-        asset_id: closed.asset.to_string(),
-        market_slug: closed.slug.clone(),
-        avg_price: closed.avg_price.round_dp(4).normalize().to_string(),
-        total_bought: closed.total_bought.round_dp(4).normalize().to_string(),
-        realized_pnl: closed.realized_pnl.round_dp(4).normalize().to_string(),
-        closed_at_ms: normalize_timestamp_ms(closed.timestamp),
-    }
-}
-
-fn normalize_timestamp_ms(timestamp: i64) -> i64 {
-    if timestamp.abs() < 1_000_000_000_000 {
-        timestamp.saturating_mul(1_000)
-    } else {
-        timestamp
+fn position_settlement_payload(position: PositionRecord) -> RedeemablePositionPayload {
+    RedeemablePositionPayload {
+        raw: RawPositionPayload {
+            proxy_wallet: position.proxy_wallet,
+            asset: position.asset,
+            condition_id: position.condition_id,
+            market_slug: position.market_slug,
+            outcome: position.outcome,
+            avg_price: position.avg_price,
+            size: position.size,
+            total_bought: position.total_bought,
+            current_value: position.current_value,
+            cash_pnl: position.cash_pnl,
+            realized_pnl: position.realized_pnl,
+            cur_price: position.cur_price,
+            end_date: position.end_date,
+            timestamp: position.timestamp,
+        },
     }
 }
 
@@ -1001,7 +915,7 @@ fn parse_decimal(value: &str) -> Decimal {
     value.parse::<Decimal>().unwrap_or(Decimal::ZERO)
 }
 
-fn strategy_latest_time(strategy: &StrategySnapshot) -> i64 {
+fn strategy_latest_time(strategy: &StrategyInfo) -> i64 {
     [
         strategy.last_trade_ms.unwrap_or(0),
         strategy.last_order_ms.unwrap_or(0),
@@ -1052,9 +966,9 @@ fn parse_strategy_signal(strategy: &events::Strategy) -> Option<SignalPayload> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::Utc;
     use polymarket_client_sdk::clob::types::{OrderStatusType, Side as MarketSide};
-    use polymarket_client_sdk::data::types::response::ClosedPosition;
+    use polymarket_client_sdk::data::types::response::Position as DataPosition;
     use polymarket_client_sdk::types::{B256, U256};
     use rust_decimal::Decimal;
 
@@ -1062,71 +976,99 @@ mod tests {
     use crate::events;
     use crate::polymarket::types::open_orders::Order as OpenOrder;
     use crate::polymarket::types::positions::Position;
-    use crate::polymarket::user_task::ClosedPositionsCache;
+    use crate::storage::sqlite::Store;
     use crate::strategy::crypto_reversal::model::Side;
     use crate::strategy::crypto_reversal::service::Candidate;
     use crate::types::crypto::{Interval, Symbol};
 
-    #[test]
-    fn closed_positions_can_use_hydrated_market_strategy() {
-        let dashboard = Handle::new();
-        dashboard.register_strategy("crypto_reversal");
-        dashboard.load_strategy_attribution(&[events::Strategy {
-            order_id: "order-older".to_string(),
-            strategy: "crypto_reversal".to_string(),
-            symbol: "eth".to_string(),
-            interval: "5m".to_string(),
-            market_slug: "eth-updown-5m-old".to_string(),
-            side: "up".to_string(),
-            created_at: 100,
-            event: "{\"signal_time_ms\":90}".to_string(),
-        }]);
-
-        let closed: ClosedPosition = serde_json::from_value(serde_json::json!({
+    fn redeemable_position(
+        asset: &str,
+        slug: &str,
+        total_bought: i64,
+        pnl_cents: i64,
+    ) -> DataPosition {
+        serde_json::from_value(serde_json::json!({
             "proxyWallet": "0x0000000000000000000000000000000000000000",
-            "asset": "123",
+            "asset": asset,
             "conditionId": format!("0x{}", "0".repeat(64)),
+            "size": Decimal::new(total_bought, 0),
             "avgPrice": Decimal::new(43, 2),
-            "totalBought": Decimal::new(8, 0),
-            "realizedPnl": Decimal::new(57, 2),
+            "initialValue": Decimal::new(total_bought * 43, 2),
+            "currentValue": Decimal::ONE,
+            "cashPnl": Decimal::new(pnl_cents, 2),
+            "percentPnl": Decimal::ZERO,
+            "totalBought": Decimal::new(total_bought, 0),
+            "realizedPnl": Decimal::new(pnl_cents, 2),
+            "percentRealizedPnl": Decimal::ZERO,
             "curPrice": Decimal::ONE,
-            "timestamp": 1710003600000_i64,
+            "redeemable": true,
+            "mergeable": false,
             "title": "ETH test",
-            "slug": "eth-updown-5m-old",
+            "slug": slug,
             "icon": "",
             "eventSlug": "eth",
+            "eventId": "",
             "outcome": "Yes",
             "outcomeIndex": 0,
             "oppositeOutcome": "No",
             "oppositeAsset": "456",
-            "endDate": Utc
-                .timestamp_millis_opt(1710003600000)
-                .single()
-                .unwrap()
-                .to_rfc3339(),
+            "endDate": "2026-03-25",
+            "negativeRisk": false,
         }))
-        .expect("closed position should deserialize");
-        let cache = ClosedPositionsCache::new();
-        cache.replace(vec![closed]);
-        dashboard.attach_closed_positions_cache(cache);
+        .expect("position should deserialize")
+    }
 
-        let payload =
-            serde_json::to_value(dashboard.snapshot()).expect("snapshot should serialize");
+    #[tokio::test]
+    async fn positions_page_can_use_hydrated_market_strategy() {
+        let dashboard = Handle::new();
+        dashboard.register_strategy("crypto_reversal");
+        let store = Store::open_memory()
+            .await
+            .expect("memory sqlite should open");
+        store
+            .insert_strategy(&events::Strategy {
+                order_id: "order-older".to_string(),
+                asset_id: "123".to_string(),
+                strategy: "crypto_reversal".to_string(),
+                symbol: "eth".to_string(),
+                interval: "5m".to_string(),
+                market_slug: "eth-updown-5m-old".to_string(),
+                side: "up".to_string(),
+                outcome: "up".to_string(),
+                created_at: 100,
+                event: "{\"signal_time_ms\":90}".to_string(),
+            })
+            .await
+            .expect("strategy insert should work");
+
+        let position = redeemable_position("123", "eth-updown-5m-old", 8, 57);
+        store
+            .insert_positions_at(&[position], 1_710_003_600_000)
+            .await
+            .expect("position insert should work");
+        dashboard.load_strategy_attribution(
+            &store
+                .select_strategy_attribution()
+                .await
+                .expect("strategy attribution should load"),
+        );
+        dashboard.attach_store(store);
+
+        let payload = serde_json::to_value(dashboard.info().await.expect("info should build"))
+            .expect("info should serialize");
         let strategies = payload["strategies"]
             .as_array()
             .expect("strategies should be an array");
         let strategy = strategies
             .iter()
             .find(|item| item["strategy"] == "crypto_reversal")
-            .expect("strategy snapshot should exist");
+            .expect("strategy info should exist");
 
-        assert_eq!(payload["account"]["settled_count"], 1);
-        assert_eq!(payload["account"]["settled_pnl_usdc"], "0.57");
-        assert_eq!(strategy["settled_count"], 1);
-        assert_eq!(strategy["settled_pnl_usdc"], "0.57");
-        assert_eq!(strategy["settled_count"], 1);
+        assert_eq!(strategy["outcome"], "up");
 
-        let page = dashboard.closed_positions_page("crypto_reversal", None, 1, 10);
+        let page = dashboard
+            .positions_page("crypto_reversal", None, 1, 10)
+            .await;
         assert_eq!(
             page.rows[0].raw.proxy_wallet.to_string(),
             "0x0000000000000000000000000000000000000000"
@@ -1137,77 +1079,161 @@ mod tests {
             format!("0x{}", "0".repeat(64))
         );
         assert_eq!(page.rows[0].raw.avg_price, "0.43");
-        assert_eq!(page.rows[0].raw.total_bought, "8");
+        assert_eq!(page.rows[0].raw.market_slug, "eth-updown-5m-old");
+        assert_eq!(page.rows[0].raw.outcome, "Yes");
+        assert_eq!(page.rows[0].raw.size.as_deref(), Some("8"));
+        assert_eq!(page.rows[0].raw.total_bought.as_deref(), Some("8"));
+        assert_eq!(page.rows[0].raw.current_value.as_deref(), Some("1"));
+        assert_eq!(page.rows[0].raw.cash_pnl.as_deref(), Some("0.57"));
         assert_eq!(page.rows[0].raw.realized_pnl, "0.57");
         assert_eq!(page.rows[0].raw.cur_price, "1");
-        assert_eq!(page.rows[0].raw.title, "ETH test");
-        assert_eq!(page.rows[0].raw.slug, "eth-updown-5m-old");
-        assert_eq!(page.rows[0].raw.event_slug, "eth");
-        assert_eq!(page.rows[0].raw.outcome_index, 0);
-        assert_eq!(page.rows[0].raw.opposite_outcome, "No");
-        assert_eq!(page.rows[0].raw.opposite_asset.to_string(), "456");
         assert_eq!(page.rows[0].raw.timestamp, 1710003600000_i64);
     }
 
-    #[test]
-    fn closed_positions_page_supports_pagination() {
+    #[tokio::test]
+    async fn info_reads_trigger_and_closed_counts_from_store() {
         let dashboard = Handle::new();
         dashboard.register_strategy("crypto_reversal");
-        dashboard.load_strategy_attribution(&[events::Strategy {
-            order_id: "order-page".to_string(),
-            strategy: "crypto_reversal".to_string(),
-            symbol: "eth".to_string(),
-            interval: "5m".to_string(),
-            market_slug: "eth-updown-5m-page".to_string(),
-            side: "up".to_string(),
-            created_at: 100,
-            event: "{\"signal_time_ms\":90}".to_string(),
-        }]);
 
-        let mut closed_positions = Vec::new();
+        let store = Store::open_memory()
+            .await
+            .expect("memory sqlite should open");
+        store
+            .insert_strategy(&events::Strategy {
+                order_id: "order-filled".to_string(),
+                asset_id: "123".to_string(),
+                strategy: "crypto_reversal".to_string(),
+                symbol: "eth".to_string(),
+                interval: "5m".to_string(),
+                market_slug: "eth-updown-5m-filled".to_string(),
+                side: "up".to_string(),
+                outcome: "up".to_string(),
+                created_at: 100,
+                event: "{}".to_string(),
+            })
+            .await
+            .expect("filled strategy insert should work");
+        store
+            .insert_strategy(&events::Strategy {
+                order_id: "order-open".to_string(),
+                asset_id: "456".to_string(),
+                strategy: "crypto_reversal".to_string(),
+                symbol: "eth".to_string(),
+                interval: "15m".to_string(),
+                market_slug: "eth-updown-15m-open".to_string(),
+                side: "down".to_string(),
+                outcome: "down".to_string(),
+                created_at: 101,
+                event: "{}".to_string(),
+            })
+            .await
+            .expect("open strategy insert should work");
+        store
+            .insert_trade(&events::Trade {
+                id: "trade-event-1".to_string(),
+                order_id: Some("order-filled".to_string()),
+                trade_id: "trade-1".to_string(),
+                side: "buy".to_string(),
+                price: Decimal::new(51, 2),
+                size: Decimal::new(8, 0),
+                fee_bps: None,
+                event_time: Some(102),
+                created_at: 102,
+            })
+            .await
+            .expect("trade insert should work");
+
+        let timestamp = Utc::now().timestamp_millis();
+        let position = redeemable_position("123", "eth-updown-5m-filled", 8, 57);
+        store
+            .insert_positions_at(&[position], timestamp)
+            .await
+            .expect("position insert should work");
+
+        dashboard.attach_store(store);
+
+        let payload = serde_json::to_value(dashboard.info().await.expect("info should build"))
+            .expect("info should serialize");
+        let strategy = payload["strategies"]
+            .as_array()
+            .expect("strategies should be an array")
+            .iter()
+            .find(|item| item["strategy"] == "crypto_reversal")
+            .expect("strategy info should exist");
+
+        assert_eq!(payload["account"]["trigger_count"], 2);
+        assert_eq!(payload["account"]["closed_count"], 1);
+        assert_eq!(payload["account"]["today_closed_count"], 1);
+        assert_eq!(payload["account"]["today_closed_pnl_usdc"], "0.57");
+        assert_eq!(payload["account"]["closed_win_count"], 1);
+        assert_eq!(payload["account"]["closed_loss_count"], 0);
+        assert_eq!(payload["account"]["missed_count"], 1);
+        assert_eq!(payload["account"]["missed_win_count"], 1);
+        assert_eq!(payload["account"]["missed_loss_count"], 0);
+        assert_eq!(strategy["trigger_count"], 2);
+        assert_eq!(strategy["closed_count"], 1);
+        assert_eq!(strategy["today_closed_count"], 1);
+        assert_eq!(strategy["today_closed_pnl_usdc"], "0.57");
+        assert_eq!(strategy["closed_win_count"], 1);
+        assert_eq!(strategy["closed_loss_count"], 0);
+        assert_eq!(strategy["missed_count"], 1);
+        assert_eq!(strategy["missed_win_count"], 1);
+        assert_eq!(strategy["missed_loss_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn positions_page_supports_pagination() {
+        let dashboard = Handle::new();
+        dashboard.register_strategy("crypto_reversal");
+        let store = Store::open_memory()
+            .await
+            .expect("memory sqlite should open");
         for index in 0..3 {
-            let timestamp = 1710003600000_i64 + index as i64;
-            let closed: ClosedPosition = serde_json::from_value(serde_json::json!({
-                "proxyWallet": "0x0000000000000000000000000000000000000000",
-                "asset": format!("{}", 100 + index),
-                "conditionId": format!("0x{}", "0".repeat(64)),
-                "avgPrice": Decimal::new(43, 2),
-                "totalBought": Decimal::new(8 + index as i64, 0),
-                "realizedPnl": Decimal::new(57 + index as i64, 2),
-                "curPrice": Decimal::ONE,
-                "timestamp": timestamp,
-                "title": "ETH test",
-                "slug": "eth-updown-5m-page",
-                "icon": "",
-                "eventSlug": "eth",
-                "outcome": "Yes",
-                "outcomeIndex": 0,
-                "oppositeOutcome": "No",
-                "oppositeAsset": "456",
-                "endDate": Utc
-                    .timestamp_millis_opt(timestamp)
-                    .single()
-                    .unwrap()
-                    .to_rfc3339(),
-            }))
-            .expect("closed position should deserialize");
-            closed_positions.push(closed);
+            store
+                .insert_strategy(&events::Strategy {
+                    order_id: format!("order-page-{index}"),
+                    asset_id: format!("{}", 100 + index),
+                    strategy: "crypto_reversal".to_string(),
+                    symbol: "eth".to_string(),
+                    interval: "5m".to_string(),
+                    market_slug: "eth-updown-5m-page".to_string(),
+                    side: "up".to_string(),
+                    outcome: String::new(),
+                    created_at: 100 + index as i64,
+                    event: "{\"signal_time_ms\":90}".to_string(),
+                })
+                .await
+                .expect("strategy insert should work");
         }
 
-        let cache = ClosedPositionsCache::new();
-        cache.replace(closed_positions);
-        dashboard.attach_closed_positions_cache(cache);
+        for index in 0..3 {
+            let position = redeemable_position(
+                &format!("{}", 100 + index),
+                "eth-updown-5m-page",
+                8 + index as i64,
+                57 + index as i64,
+            );
+            store
+                .insert_positions_at(&[position], 1710003600000_i64 + index as i64)
+                .await
+                .expect("positions insert should work");
+        }
+        dashboard.attach_store(store);
 
-        let first_page = dashboard.closed_positions_page("crypto_reversal", None, 1, 2);
+        let first_page = dashboard
+            .positions_page("crypto_reversal", None, 1, 2)
+            .await;
         assert_eq!(first_page.total, 3);
         assert_eq!(first_page.total_pages, 2);
         assert_eq!(first_page.rows.len(), 2);
-        assert_eq!(first_page.rows[0].asset_id, "102");
-        assert_eq!(first_page.rows[1].asset_id, "101");
+        assert_eq!(first_page.rows[0].raw.asset, "102");
+        assert_eq!(first_page.rows[1].raw.asset, "101");
 
-        let second_page = dashboard.closed_positions_page("crypto_reversal", None, 2, 2);
+        let second_page = dashboard
+            .positions_page("crypto_reversal", None, 2, 2)
+            .await;
         assert_eq!(second_page.rows.len(), 1);
-        assert_eq!(second_page.rows[0].asset_id, "100");
+        assert_eq!(second_page.rows[0].raw.asset, "100");
     }
 
     #[test]

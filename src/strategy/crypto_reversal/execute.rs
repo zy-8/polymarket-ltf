@@ -207,7 +207,7 @@ pub async fn submit<S: Signer>(
     })?;
     reservation.keep();
     spawn_cancel_if_unfilled(candidate, client.clone(), post.order_id.clone());
-    persist_strategy_submission(store, candidate, &post.order_id).await;
+    persist_strategy_submission(store, candidate, &asset_id, &post.order_id).await;
 
     Ok(Attempt::Submitted(Submission {
         asset_id,
@@ -371,9 +371,19 @@ fn side_name(side: Side) -> &'static str {
     }
 }
 
-async fn persist_strategy_submission(store: &Store, candidate: &Candidate, order_id: &str) {
-    let event =
-        events::Strategy::from_candidate(constants::STRATEGY_NAME, order_id.to_string(), candidate);
+async fn persist_strategy_submission(
+    store: &Store,
+    candidate: &Candidate,
+    asset_id: &U256,
+    order_id: &str,
+) {
+    let event = events::Strategy::from_candidate(
+        constants::STRATEGY_NAME,
+        order_id.to_string(),
+        asset_id.to_string(),
+        candidate,
+        String::new(),
+    );
 
     if let Err(error) = store.insert_strategy(&event).await {
         warn!(

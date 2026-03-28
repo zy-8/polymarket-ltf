@@ -17,6 +17,9 @@
   --amber: #f59e0b;
   --shadow: 0 20px 60px rgba(15, 23, 42, 0.08);
   --font-sans: "Manrope", "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
+  --table-row-height: 92px;
+  --table-row-gap: 12px;
+  --table-visible-rows: 10;
 }
 
 *,
@@ -197,11 +200,16 @@ button {
 }
 
 .status-strip,
-.hero-actions,
 .strategy-switcher,
 .tabs {
   display: flex;
   flex-wrap: wrap;
+  gap: 10px;
+}
+
+.hero-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -302,8 +310,7 @@ button {
   border-color: rgba(47, 100, 255, 0.28);
 }
 
-.strategy-chip-head,
-.strategy-chip-meta {
+.strategy-chip-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -316,9 +323,13 @@ button {
 }
 
 .strategy-chip-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
   margin-top: 12px;
   color: var(--muted);
   font-size: 13px;
+  font-weight: 700;
 }
 
 .tabs-row {
@@ -388,14 +399,44 @@ button {
 
 .table-body {
   display: grid;
-  gap: 12px;
+  gap: var(--table-row-gap);
+  min-height: calc(var(--table-row-height) * var(--table-visible-rows) + var(--table-row-gap) * (var(--table-visible-rows) - 1));
+  max-height: calc(var(--table-row-height) * var(--table-visible-rows) + var(--table-row-gap) * (var(--table-visible-rows) - 1));
+  overflow-y: auto;
+  padding-right: 6px;
+  align-content: start;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(91, 107, 134, 0.35) transparent;
+}
+
+.table-body.is-empty {
+  display: block;
 }
 
 .table-row {
   padding: 18px 18px;
+  min-height: var(--table-row-height);
   border: 1px solid var(--line);
   border-radius: 24px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.96));
+}
+
+.table-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.table-body::-webkit-scrollbar-thumb {
+  background: rgba(91, 107, 134, 0.3);
+  border-radius: 999px;
+}
+
+.table-load-more {
+  display: grid;
+  place-items: center;
+  min-height: 56px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .market-cell {
@@ -575,6 +616,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .hero-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .table-head,
   .table-row {
     grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(110px, 1fr));
@@ -633,9 +678,15 @@ button {
   .table-row {
     grid-template-columns: 1fr;
     gap: 10px;
+    min-height: auto;
   }
 
   .table-row > div {
     min-width: 0;
+  }
+
+  .hero-actions,
+  .strategy-chip-meta {
+    grid-template-columns: 1fr;
   }
 }
