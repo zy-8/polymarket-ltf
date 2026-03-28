@@ -1,25 +1,41 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import talib.abstract as ta
 
-from strategies.CryptoReversalHyperopt import CryptoReversalHyperopt
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from strategies.crypto_reversal import CryptoReversal
+
+
+DEFAULT_TIMERANGE = "1774677600-"
+
+BACKGROUND_LOOKBACK_15M = 8
+BACKGROUND_LOOKBACK_1H = 6
+BACKGROUND_BLOCK_15M_PCT = 0.006
+BACKGROUND_BLOCK_1H_PCT = 0.010
+BACKGROUND_REDUCE_15M_PCT = 0.003
+BACKGROUND_REDUCE_1H_PCT = 0.005
+BACKGROUND_REDUCE_FACTOR = 0.5
+BACKGROUND_BLOCK_1H_PCT_15M = 0.008
+BACKGROUND_BLOCK_4H_PCT_15M = 0.012
+BACKGROUND_REDUCE_1H_PCT_15M = 0.004
+BACKGROUND_REDUCE_4H_PCT_15M = 0.006
+BACKGROUND_REDUCE_FACTOR_15M = 0.75
 
 
 @dataclass(frozen=True)
 class BackgroundProfile:
-    """背景周期过滤参数。
-
-    这些数值直接对齐 Rust `crypto_reversal/service.rs` 里的配置。
-    """
-
     fast_timeframe: str
     slow_timeframe: str
     fast_lookback: int
@@ -31,300 +47,250 @@ class BackgroundProfile:
     reduce_factor: float
 
 
-def build_cli_parser() -> argparse.ArgumentParser:
-    """构造命令行参数。
-
-    这个脚本的职责非常单一：
-
-    - 可选地下载 Binance futures K 线
-    - 计算 `crypto_reversal` 信号
-    - 统计“当前柱子出信号后，下一根柱子方向是否命中”
-    """
-
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="评估 crypto_reversal 信号对下一根柱子方向的命中率"
+        description="拉取现货 OHLCV 并统计 CryptoReversal 信号表现。"
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=SCRIPT_DIR / "config.json",
+        help="Freqtrade 配置文件路径。",
+    )
+    parser.add_argument(
+        "--userdir",
+        type=Path,
+        default=SCRIPT_DIR / "user_data",
+        help="Freqtrade user_data 路径。",
+    )
+    parser.add_argument(
+        "--datadir",
+        type=Path,
+        default=SCRIPT_DIR / "user_data" / "data",
+        help="Freqtrade OHLCV 数据目录。",
     )
     parser.add_argument(
         "--pair",
-        default="BTC/USDT:USDT",
-        help="交易对，默认 BTC/USDT:USDT",
+        help="要统计的交易对。默认取 config.json 里的第一个 pair_whitelist。",
     )
     parser.add_argument(
         "--timeframe",
-        default="5m",
-        help="K 线周期，默认 5m",
+        help="OHLCV 周期。默认取 config.json 里的 timeframe。",
     )
     parser.add_argument(
-        "--timerange",
-        default="20240101-20241231",
-        help="下载数据的时间范围，默认 20240101-20241231",
+        "--exchange",
+        help="交易所名。默认取 config.json 里的 exchange.name。",
     )
     parser.add_argument(
         "--skip-download",
         action="store_true",
-        help="跳过数据下载，直接使用本地已有数据",
+        help="跳过 freqtrade download-data，只统计本地已有 OHLCV。",
     )
-    return parser
+    parser.add_argument(
+        "--export-csv",
+        type=Path,
+        help="可选。导出逐笔信号明细 CSV 的路径。",
+    )
+    return parser.parse_args()
 
 
-def freqtrade_root_dir() -> Path:
-    """返回 `backtest/freqtrade/` 根目录。"""
-
-    return Path(__file__).resolve().parent
+def load_config(config_path: Path) -> dict:
+    return json.loads(config_path.read_text())
 
 
-def run_command(command: list[str], cwd: Path) -> None:
-    """执行外部命令。
-
-    这里主要用于调用 `freqtrade download-data`。
-    如果命令失败，直接抛异常，方便用户看到原始报错。
-    """
-
-    full_command = [sys.executable, "-m", *command]
-    print("running:", " ".join(full_command))
-    subprocess.run(full_command, cwd=str(cwd), check=True)
-
-
-def data_file_path(data_dir: Path, pair: str, timeframe: str) -> Path:
-    """根据交易对和周期拼出 Freqtrade 数据文件路径。
-
-    例如：
-
-    - `BTC/USDT:USDT`
-    - `5m`
-
-    会映射到：
-
-    - `futures/BTC_USDT_USDT-5m-futures.feather`
-    """
-
-    normalized_pair = pair.replace("/", "_").replace(":", "_")
-    return data_dir / "futures" / f"{normalized_pair}-{timeframe}-futures.feather"
+def parse_timerange_value(raw: str) -> pd.Timestamp | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        if len(raw) == 8:
+            return pd.Timestamp.strptime(raw, "%Y%m%d").tz_localize("UTC")
+        if len(raw) >= 13:
+            return pd.to_datetime(int(raw), unit="ms", utc=True)
+        return pd.to_datetime(int(raw), unit="s", utc=True)
+    return pd.to_datetime(raw, utc=True)
 
 
-def ensure_data_downloaded(
-    project_root: Path,
+def parse_timerange(timerange: str | None) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if not timerange:
+        return None, None
+    if "-" not in timerange:
+        raise ValueError(f"Unsupported timerange: {timerange}")
+    start_raw, end_raw = timerange.split("-", 1)
+    return parse_timerange_value(start_raw), parse_timerange_value(end_raw)
+
+
+def normalize_pair_filename(pair: str) -> str:
+    return pair.replace("/", "_").replace(":", "_")
+
+
+def resolve_market_settings(args: argparse.Namespace, config: dict) -> tuple[str, str, str]:
+    pair = args.pair or config["exchange"]["pair_whitelist"][0]
+    timeframe = args.timeframe or config["timeframe"]
+    exchange = args.exchange or config["exchange"]["name"]
+    return pair, timeframe, exchange
+
+
+def download_spot_data(
     config_path: Path,
-    user_dir: Path,
-    data_dir: Path,
+    userdir: Path,
+    datadir: Path,
+    exchange: str,
     pair: str,
-    timeframe: str,
-    timerange: str,
+    timeframes: list[str],
+    timerange: str | None,
 ) -> None:
-    """用 Freqtrade 下载主周期 OHLCV 数据。"""
+    command = [
+        "freqtrade",
+        "download-data",
+        "--config",
+        str(config_path),
+        "--userdir",
+        str(userdir),
+        "--datadir",
+        str(datadir),
+        "--exchange",
+        exchange,
+        "--trading-mode",
+        "spot",
+        "--timeframes",
+        *timeframes,
+        "-p",
+        pair,
+    ]
+    if timerange:
+        command.extend(["--timerange", timerange])
 
-    run_command(
-        [
-            "freqtrade",
-            "download-data",
-            "--config",
-            str(config_path),
-            "--userdir",
-            str(user_dir),
-            "--datadir",
-            str(data_dir),
-            "--pairs",
-            pair,
-            "--timeframes",
-            timeframe,
-            "--timerange",
-            timerange,
-        ],
-        cwd=project_root,
-    )
-
-
-def load_ohlcv_frame(path: Path) -> pd.DataFrame:
-    """读取本地 feather 数据，并按时间排序。"""
-
-    frame = pd.read_feather(path).copy()
-    frame["date"] = pd.to_datetime(frame["date"], utc=True)
-    return frame.sort_values("date").reset_index(drop=True)
+    subprocess.run(command, check=True)
 
 
-def default_params() -> dict[str, float | int]:
-    """读取策略类里的当前默认参数。
+def resolve_ohlcv_file(datadir: Path, pair: str, timeframe: str) -> Path:
+    base = f"{normalize_pair_filename(pair)}-{timeframe}"
+    candidates = [
+        datadir / f"{base}.feather",
+        datadir / f"{base}.parquet",
+        datadir / f"{base}.json",
+        datadir / f"{base}.json.gz",
+    ]
 
-    这里统一从 `CryptoReversalHyperopt` 里拿默认值，
-    这样信号评估脚本和 Freqtrade 策略定义不会各维护一份参数。
-    """
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
 
-    return {
-        "long_rsi_max": int(CryptoReversalHyperopt.long_rsi_max.value),
-        "short_rsi_min": int(CryptoReversalHyperopt.short_rsi_min.value),
-        "min_width_pct": float(CryptoReversalHyperopt.min_width_pct.value),
-        "band_pad_pct": float(CryptoReversalHyperopt.band_pad_pct.value),
-        "rsi_period": int(CryptoReversalHyperopt.rsi_period.value),
-        "bb_period": int(CryptoReversalHyperopt.bb_period.value),
-        "bb_stddev": float(CryptoReversalHyperopt.bb_stddev.value),
-        "macd_fast": int(CryptoReversalHyperopt.macd_fast),
-        "macd_slow": int(CryptoReversalHyperopt.macd_slow),
-        "macd_signal": int(CryptoReversalHyperopt.macd_signal),
-        "add_score": float(CryptoReversalHyperopt.add_score),
-        "max_score": float(CryptoReversalHyperopt.max_score),
-    }
+    raise FileNotFoundError(f"OHLCV file not found for {pair} {timeframe} under {datadir}")
+
+
+def timeframe_to_minutes(timeframe: str) -> int:
+    unit = timeframe[-1]
+    value = int(timeframe[:-1])
+    if unit == "m":
+        return value
+    if unit == "h":
+        return value * 60
+    raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+
+def timeframe_to_timedelta(timeframe: str) -> pd.Timedelta:
+    return pd.Timedelta(minutes=timeframe_to_minutes(timeframe))
+
+
+def timeframe_to_pandas_freq(timeframe: str) -> str:
+    unit = timeframe[-1]
+    value = int(timeframe[:-1])
+    if unit == "m":
+        return f"{value}min"
+    if unit == "h":
+        return f"{value}h"
+    raise ValueError(f"Unsupported timeframe: {timeframe}")
 
 
 def background_profile(timeframe: str) -> BackgroundProfile | None:
-    """返回给定主周期对应的背景过滤规则。"""
-
     if timeframe == "5m":
         return BackgroundProfile(
             fast_timeframe="15m",
             slow_timeframe="1h",
-            fast_lookback=8,
-            slow_lookback=6,
-            block_fast_pct=0.006,
-            block_slow_pct=0.010,
-            reduce_fast_pct=0.003,
-            reduce_slow_pct=0.005,
-            reduce_factor=0.5,
+            fast_lookback=BACKGROUND_LOOKBACK_15M,
+            slow_lookback=BACKGROUND_LOOKBACK_1H,
+            block_fast_pct=BACKGROUND_BLOCK_15M_PCT,
+            block_slow_pct=BACKGROUND_BLOCK_1H_PCT,
+            reduce_fast_pct=BACKGROUND_REDUCE_15M_PCT,
+            reduce_slow_pct=BACKGROUND_REDUCE_1H_PCT,
+            reduce_factor=BACKGROUND_REDUCE_FACTOR,
         )
     if timeframe == "15m":
         return BackgroundProfile(
             fast_timeframe="1h",
             slow_timeframe="4h",
-            fast_lookback=8,
-            slow_lookback=6,
-            block_fast_pct=0.008,
-            block_slow_pct=0.012,
-            reduce_fast_pct=0.004,
-            reduce_slow_pct=0.006,
-            reduce_factor=0.75,
+            fast_lookback=BACKGROUND_LOOKBACK_15M,
+            slow_lookback=BACKGROUND_LOOKBACK_1H,
+            block_fast_pct=BACKGROUND_BLOCK_1H_PCT_15M,
+            block_slow_pct=BACKGROUND_BLOCK_4H_PCT_15M,
+            reduce_fast_pct=BACKGROUND_REDUCE_1H_PCT_15M,
+            reduce_slow_pct=BACKGROUND_REDUCE_4H_PCT_15M,
+            reduce_factor=BACKGROUND_REDUCE_FACTOR_15M,
         )
     return None
 
 
-def compute_signal_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """给原始 K 线加上信号评估所需的全部列。
+def required_timeframes(main_timeframe: str) -> list[str]:
+    profile = background_profile(main_timeframe)
+    if profile is None:
+        return [main_timeframe]
 
-    这个函数只做研究，不做交易回测。
-
-    最终关心的是：
-
-    - 当前柱子是否触发 `UP`
-    - 当前柱子是否触发 `DOWN`
-    - 下一根柱子最终是涨还是跌
-    """
-
-    params = default_params()
-    result = frame.copy()
-
-    # 1. 计算基础技术指标。
-    result["rsi"] = ta.RSI(result, timeperiod=params["rsi_period"])
-    bb_upper, bb_middle, bb_lower = ta.BBANDS(
-        result["close"],
-        timeperiod=params["bb_period"],
-        nbdevup=params["bb_stddev"],
-        nbdevdn=params["bb_stddev"],
-        matype=0,
-    )
-    result["bb_upper"] = bb_upper
-    result["bb_middle"] = bb_middle
-    result["bb_lower"] = bb_lower
-    _macd_line, _macd_signal, macd_hist = ta.MACD(
-        result["close"],
-        fastperiod=params["macd_fast"],
-        slowperiod=params["macd_slow"],
-        signalperiod=params["macd_signal"],
-    )
-    result["macdhist"] = macd_hist
-
-    # 2. 计算布林带宽度和 MACD 确认列。
-    basis = result["bb_middle"].replace(0, np.nan)
-    result["bb_width_pct"] = ((result["bb_upper"] - result["bb_lower"]) / basis) * 100.0
-    result["band_pad"] = result["bb_middle"] * (params["band_pad_pct"] / 100.0)
-    result["macd_confirm_long"] = result["macdhist"] >= result["macdhist"].shift(1)
-    result["macd_confirm_short"] = result["macdhist"] <= result["macdhist"].shift(1)
-
-    # 3. 计算 score 和 size_factor。
-    basis_safe = result["bb_middle"].clip(lower=1e-9)
-    long_rsi_denom = max(float(params["long_rsi_max"]), 1e-9)
-    short_rsi_denom = max(100.0 - float(params["short_rsi_min"]), 1e-9)
-
-    result["score_long"] = (
-        ((params["long_rsi_max"] - result["rsi"]).clip(lower=0.0) / long_rsi_denom)
-        + (((result["bb_lower"] - result["close"]).clip(lower=0.0) / basis_safe) * 100.0)
-        + (result["bb_width_pct"] / 10.0)
-        + np.where(result["macd_confirm_long"], 0.15, 0.0)
-    )
-    result["score_short"] = (
-        ((result["rsi"] - params["short_rsi_min"]).clip(lower=0.0) / short_rsi_denom)
-        + (((result["close"] - result["bb_upper"]).clip(lower=0.0) / basis_safe) * 100.0)
-        + (result["bb_width_pct"] / 10.0)
-        + np.where(result["macd_confirm_short"], 0.15, 0.0)
-    )
-
-    result["size_factor_long"] = np.select(
-        [
-            result["score_long"] >= params["max_score"],
-            result["score_long"] >= params["add_score"],
-        ],
-        [2.0, 1.5],
-        default=1.0,
-    )
-    result["size_factor_short"] = np.select(
-        [
-            result["score_short"] >= params["max_score"],
-            result["score_short"] >= params["add_score"],
-        ],
-        [2.0, 1.5],
-        default=1.0,
-    )
-
-    # 4. 给每根柱子打上 `UP / DOWN` 信号标签。
-    result["enter_long"] = (
-        (result["volume"] > 0)
-        & (result["bb_width_pct"] >= params["min_width_pct"])
-        & (result["close"] <= (result["bb_lower"] + result["band_pad"]))
-        & (result["rsi"] < params["long_rsi_max"])
-    )
-    result["enter_short"] = (
-        (result["volume"] > 0)
-        & (result["bb_width_pct"] >= params["min_width_pct"])
-        & (result["close"] >= (result["bb_upper"] - result["band_pad"]))
-        & (result["rsi"] > params["short_rsi_min"])
-    )
-
-    # 5. 生成“下一根柱子方向”。
-    # 如果当前第 t 根出信号，就只检查第 t+1 根是涨还是跌。
-    result["next_open"] = result["open"].shift(-1)
-    result["next_close"] = result["close"].shift(-1)
-    result["next_is_up"] = result["next_close"] > result["next_open"]
-    result["next_is_down"] = result["next_close"] < result["next_open"]
-
-    return result
+    ordered = [main_timeframe, profile.fast_timeframe, profile.slow_timeframe]
+    deduped: list[str] = []
+    for timeframe in ordered:
+        if timeframe not in deduped:
+            deduped.append(timeframe)
+    return deduped
 
 
-def percent_change(first: float, last: float) -> float:
-    """计算区间涨跌幅。"""
+def load_ohlcv(path: Path) -> pd.DataFrame:
+    if path.suffix == ".feather":
+        dataframe = pd.read_feather(path)
+    elif path.suffix == ".parquet":
+        dataframe = pd.read_parquet(path)
+    elif path.suffix == ".json":
+        dataframe = pd.read_json(path)
+    elif path.name.endswith(".json.gz"):
+        dataframe = pd.read_json(path, compression="gzip")
+    else:
+        raise ValueError(f"Unsupported OHLCV format: {path}")
 
-    return 0.0 if first == 0 else (last - first) / first
-
-
-def pandas_rule(timeframe: str) -> str:
-    """把 Freqtrade 周期字符串映射成 pandas 重采样规则。"""
-
-    mapping = {
-        "5m": "5min",
-        "15m": "15min",
-        "1h": "1h",
-        "4h": "4h",
-    }
-    try:
-        return mapping[timeframe]
-    except KeyError as exc:
-        raise ValueError(f"暂不支持的周期: {timeframe}") from exc
+    dataframe["date"] = pd.to_datetime(dataframe["date"], utc=True)
+    return dataframe.sort_values("date").reset_index(drop=True)
 
 
-def resample_ohlcv(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """把主周期 OHLCV 重采样成背景周期。
+def filter_dataframe_by_timerange(
+    dataframe: pd.DataFrame,
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+) -> pd.DataFrame:
+    filtered = dataframe.copy()
+    if start is not None:
+        filtered = filtered[filtered["date"] >= start]
+    if end is not None:
+        filtered = filtered[filtered["date"] <= end]
+    return filtered.reset_index(drop=True)
 
-    这里直接从本地已有 K 线重采样，避免为了背景过滤再额外联网拉数据。
-    """
 
-    indexed = frame.copy().set_index("date")
-    resampled = indexed.resample(pandas_rule(timeframe), label="right", closed="right").agg(
+def add_close_time(dataframe: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    enriched = dataframe.copy()
+    enriched["close_time"] = enriched["date"] + timeframe_to_timedelta(timeframe)
+    enriched.attrs["timeframe"] = timeframe
+    return enriched
+
+
+def resample_ohlcv(dataframe: pd.DataFrame, source_timeframe: str, target_timeframe: str) -> pd.DataFrame:
+    source_minutes = timeframe_to_minutes(source_timeframe)
+    target_minutes = timeframe_to_minutes(target_timeframe)
+    if target_minutes % source_minutes != 0:
+        raise ValueError(f"Cannot resample {source_timeframe} to {target_timeframe}")
+
+    bars_per_target = target_minutes // source_minutes
+    target_freq = timeframe_to_pandas_freq(target_timeframe)
+    indexed = dataframe.set_index("date")
+    resampled = indexed.resample(target_freq, label="left", closed="left").agg(
         {
             "open": "first",
             "high": "max",
@@ -333,279 +299,242 @@ def resample_ohlcv(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
             "volume": "sum",
         }
     )
+    counts = indexed["close"].resample(target_freq, label="left", closed="left").count()
+    resampled["bar_count"] = counts
+    resampled = resampled[resampled["bar_count"] == bars_per_target].drop(columns=["bar_count"])
     resampled = resampled.dropna(subset=["open", "high", "low", "close"]).reset_index()
     return resampled
 
 
-def load_main_timeframe_frame(data_dir: Path, pair: str, timeframe: str) -> pd.DataFrame:
-    """读取主周期数据。
+def load_timeframe_data(datadir: Path, pair: str, timeframe: str, base_data: pd.DataFrame | None = None) -> pd.DataFrame:
+    try:
+        dataframe = load_ohlcv(resolve_ohlcv_file(datadir, pair, timeframe))
+    except FileNotFoundError:
+        if base_data is None:
+            raise
+        base_minutes = timeframe_to_minutes(base_data.attrs["timeframe"])
+        target_minutes = timeframe_to_minutes(timeframe)
+        if target_minutes <= base_minutes:
+            raise
+        dataframe = resample_ohlcv(base_data, base_data.attrs["timeframe"], timeframe)
 
-    优先读取与目标周期完全匹配的本地文件。
-    如果目标是 `15m` 且本地没有 `15m` 文件，则退化为：
+    return add_close_time(dataframe, timeframe)
 
-    - 读取现有 `5m` 文件
-    - 在本地重采样成 `15m`
 
-    这样在你已经下载过 `5m` 的情况下，不必额外联网再拉一次 `15m`。
-    """
-
-    direct_path = data_file_path(data_dir, pair, timeframe)
-    if direct_path.exists():
-        return load_ohlcv_frame(direct_path)
-
-    if timeframe == "15m":
-        fallback_path = data_file_path(data_dir, pair, "5m")
-        if fallback_path.exists():
-            fallback_frame = load_ohlcv_frame(fallback_path)
-            return resample_ohlcv(fallback_frame, "15m")
-
-    raise FileNotFoundError(
-        f"未找到主周期数据文件: {direct_path}。"
-        "如果本地还没有数据，请不要传 --skip-download。"
-    )
+def percent_change(first: float, last: float) -> float:
+    if first == 0.0:
+        return 0.0
+    return (last - first) / first
 
 
 def evaluate_background_action(
-    side: str,
-    change_fast: float,
-    change_slow: float,
-    profile: BackgroundProfile,
-) -> str:
-    """按 Rust 规则返回背景过滤动作。"""
-
-    if side == "up":
-        if change_fast <= -profile.block_fast_pct and change_slow <= -profile.block_slow_pct:
-            return "block"
-        if change_fast <= -profile.reduce_fast_pct or change_slow <= -profile.reduce_slow_pct:
-            return "reduce"
+    signal_close_time: pd.Timestamp,
+    profile: BackgroundProfile | None,
+    background_fast: pd.DataFrame | None,
+    background_slow: pd.DataFrame | None,
+) -> str | None:
+    if profile is None:
         return "allow"
+    if background_fast is None or background_slow is None:
+        return None
 
-    if change_fast >= profile.block_fast_pct and change_slow >= profile.block_slow_pct:
+    fast = background_fast[background_fast["close_time"] <= signal_close_time].tail(profile.fast_lookback)
+    slow = background_slow[background_slow["close_time"] <= signal_close_time].tail(profile.slow_lookback)
+
+    if len(fast) < profile.fast_lookback or len(slow) < profile.slow_lookback:
+        return None
+
+    change_fast = percent_change(float(fast.iloc[0]["close"]), float(fast.iloc[-1]["close"]))
+    change_slow = percent_change(float(slow.iloc[0]["close"]), float(slow.iloc[-1]["close"]))
+
+    if change_fast <= -profile.block_fast_pct and change_slow <= -profile.block_slow_pct:
         return "block"
-    if change_fast >= profile.reduce_fast_pct or change_slow >= profile.reduce_slow_pct:
+    if change_fast <= -profile.reduce_fast_pct or change_slow <= -profile.reduce_slow_pct:
         return "reduce"
     return "allow"
 
 
-def action_for_timestamp(
-    timestamp: pd.Timestamp,
-    side: str,
-    fast_frame: pd.DataFrame,
-    slow_frame: pd.DataFrame,
-    profile: BackgroundProfile,
-) -> str:
-    """计算某个信号时间点的背景过滤动作。
+def evaluate_signals(
+    dataframe: pd.DataFrame,
+    timeframe: str,
+    background_fast: pd.DataFrame | None = None,
+    background_slow: pd.DataFrame | None = None,
+    eval_start: pd.Timestamp | None = None,
+    eval_end: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    strategy = CryptoReversal({})
+    enriched = strategy.populate_indicators(dataframe.copy(), {})
+    enriched = strategy.populate_entry_trend(enriched, {})
 
-    只使用“当前信号时刻之前已经收盘”的背景周期 K 线。
-    如果样本不足，则返回 `missing`。
-    """
+    signal_rows: list[dict] = []
+    startup_candle_count = int(strategy.startup_candle_count)
+    signal_series = enriched.get("enter_long", pd.Series(dtype=float)).fillna(0)
+    raw_signal_count = int((signal_series == 1).sum())
+    warmup_signal_count = int((signal_series.iloc[:startup_candle_count] == 1).sum())
+    dropped_tail_signals = 0
+    blocked_signal_count = 0
+    background_missing_count = 0
+    trigger_count = 0
+    profile = background_profile(timeframe)
+    main_close_delta = timeframe_to_timedelta(timeframe)
 
-    fast_closed = fast_frame[fast_frame["date"] <= timestamp].tail(profile.fast_lookback)
-    slow_closed = slow_frame[slow_frame["date"] <= timestamp].tail(profile.slow_lookback)
-
-    if len(fast_closed) < profile.fast_lookback or len(slow_closed) < profile.slow_lookback:
-        return "missing"
-
-    change_fast = percent_change(float(fast_closed["close"].iloc[0]), float(fast_closed["close"].iloc[-1]))
-    change_slow = percent_change(float(slow_closed["close"].iloc[0]), float(slow_closed["close"].iloc[-1]))
-    return evaluate_background_action(side, change_fast, change_slow, profile)
-
-
-def compute_background_actions(
-    signal_dates: pd.Series,
-    side: str,
-    fast_frame: pd.DataFrame,
-    slow_frame: pd.DataFrame,
-    profile: BackgroundProfile,
-) -> list[str]:
-    """批量计算背景过滤动作。
-
-    这里不用逐条切 dataframe，而是：
-
-    - 先把背景周期的 `date/close` 转成数组
-    - 再用 `searchsorted` 快速找到“当前信号时刻之前最后一根已收盘背景 K 线”
-
-    这样在全年 5m 数据上会快很多。
-    """
-
-    fast_dates = fast_frame["date"].to_numpy(dtype="datetime64[ns]")
-    slow_dates = slow_frame["date"].to_numpy(dtype="datetime64[ns]")
-    fast_closes = fast_frame["close"].to_numpy(dtype=float)
-    slow_closes = slow_frame["close"].to_numpy(dtype=float)
-
-    actions: list[str] = []
-    for timestamp in signal_dates.to_numpy(dtype="datetime64[ns]"):
-        fast_end = np.searchsorted(fast_dates, timestamp, side="right")
-        slow_end = np.searchsorted(slow_dates, timestamp, side="right")
-
-        if fast_end < profile.fast_lookback or slow_end < profile.slow_lookback:
-            actions.append("missing")
+    for index in range(len(enriched)):
+        row = enriched.iloc[index]
+        if row.get("enter_long") != 1:
+            continue
+        if eval_start is not None and row["date"] < eval_start:
+            continue
+        if eval_end is not None and row["date"] > eval_end:
             continue
 
-        fast_start = fast_end - profile.fast_lookback
-        slow_start = slow_end - profile.slow_lookback
+        signal_close_time = row["date"] + main_close_delta
+        action = evaluate_background_action(
+            signal_close_time=signal_close_time,
+            profile=profile,
+            background_fast=background_fast,
+            background_slow=background_slow,
+        )
+        if action is None:
+            background_missing_count += 1
+            continue
+        if action == "block":
+            blocked_signal_count += 1
+            continue
 
-        change_fast = percent_change(fast_closes[fast_start], fast_closes[fast_end - 1])
-        change_slow = percent_change(slow_closes[slow_start], slow_closes[slow_end - 1])
-        actions.append(evaluate_background_action(side, change_fast, change_slow, profile))
+        trigger_count += 1
+        if index + 1 >= len(enriched):
+            dropped_tail_signals += 1
+            continue
 
-    return actions
+        exit_row = enriched.iloc[index + 1]
+        entry_price = float(row["close"])
+        exit_price = float(exit_row["close"])
+        pnl_pct = ((exit_price / entry_price) - 1.0) * 100.0
+
+        if pnl_pct > 0:
+            outcome = "win"
+        elif pnl_pct < 0:
+            outcome = "loss"
+        else:
+            outcome = "flat"
+
+        signal_rows.append(
+            {
+                "signal_date": row["date"],
+                "exit_date": exit_row["date"],
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "pnl_pct": pnl_pct,
+                "outcome": outcome,
+                "rsi": float(row["rsi"]),
+                "bb_lower": float(row["bb_lower"]),
+                "bb_upper": float(row["bb_upper"]),
+                "bb_width_pct": float(row["bb_width_pct"]),
+                "score_long": float(row["score_long"]),
+                "size_factor_long": float(row["size_factor_long"]),
+                "background_action": action,
+                "enter_tag": row.get("enter_tag"),
+            }
+        )
+
+    signals = pd.DataFrame(signal_rows)
+
+    wins = int((signals["outcome"] == "win").sum()) if not signals.empty else 0
+    losses = int((signals["outcome"] == "loss").sum()) if not signals.empty else 0
+    flats = int((signals["outcome"] == "flat").sum()) if not signals.empty else 0
+    completed_signals = len(signals)
+    win_rate = (wins / completed_signals) * 100.0 if completed_signals else 0.0
+    avg_pnl_pct = float(signals["pnl_pct"].mean()) if not signals.empty else 0.0
+
+    summary = {
+        "startup_candle_count": startup_candle_count,
+        "raw_signal_count": raw_signal_count,
+        "warmup_signal_count": warmup_signal_count,
+        "total_signal_count": trigger_count,
+        "blocked_signal_count": blocked_signal_count,
+        "background_missing_count": background_missing_count,
+        "completed_signals": completed_signals,
+        "dropped_tail_signals": dropped_tail_signals,
+        "wins": wins,
+        "losses": losses,
+        "flats": flats,
+        "win_rate_pct": win_rate,
+        "avg_pnl_pct": avg_pnl_pct,
+    }
+    return signals, summary
 
 
-def apply_background_filter(
-    signal_frame: pd.DataFrame,
+def print_row(label: str, value: object) -> None:
+    print(f"{label:<16}: {value}")
+
+
+def print_summary(
+    pair: str,
     timeframe: str,
-) -> pd.DataFrame:
-    """把 Rust `service.rs` 的背景过滤补到主信号结果里。"""
-
-    profile = background_profile(timeframe)
-    if profile is None:
-        result = signal_frame.copy()
-        result["background_action_long"] = "allow"
-        result["background_action_short"] = "allow"
-        return result
-
-    fast_frame = resample_ohlcv(signal_frame[["date", "open", "high", "low", "close", "volume"]], profile.fast_timeframe)
-    slow_frame = resample_ohlcv(signal_frame[["date", "open", "high", "low", "close", "volume"]], profile.slow_timeframe)
-
-    result = signal_frame.copy()
-    result["background_action_long"] = compute_background_actions(
-        result["date"], "up", fast_frame, slow_frame, profile
-    )
-    result["background_action_short"] = compute_background_actions(
-        result["date"], "down", fast_frame, slow_frame, profile
-    )
-
-    # 背景过滤会影响最终可用信号：
-    # - `block`：该信号在原始策略里会被直接拦掉
-    # - `reduce`：信号仍保留，只是 size_factor 会被打折
-    result["effective_long"] = result["enter_long"] & (result["background_action_long"] != "block")
-    result["effective_short"] = result["enter_short"] & (result["background_action_short"] != "block")
-
-    result["effective_size_factor_long"] = np.where(
-        result["background_action_long"] == "reduce",
-        result["size_factor_long"] * profile.reduce_factor,
-        result["size_factor_long"],
-    )
-    result["effective_size_factor_short"] = np.where(
-        result["background_action_short"] == "reduce",
-        result["size_factor_short"] * profile.reduce_factor,
-        result["size_factor_short"],
-    )
-
-    return result
-
-
-def hit_ratio(hits: int, total: int) -> float:
-    """把命中数转换成百分比。"""
-
-    return 0.0 if total == 0 else hits / total * 100.0
-
-
-def print_summary(frame: pd.DataFrame, pair: str, timeframe: str) -> None:
-    """打印结果摘要。"""
-
-    valid = frame.dropna(subset=["next_open", "next_close"]).copy()
-    up_signals = valid[valid["effective_long"]].copy()
-    down_signals = valid[valid["effective_short"]].copy()
-
-    up_hits = int(up_signals["next_is_up"].sum())
-    down_hits = int(down_signals["next_is_down"].sum())
-    total_signals = len(up_signals) + len(down_signals)
-    total_hits = up_hits + down_hits
-
-    print()
-    print("信号方向评估")
-    print(f"交易对: {pair}")
-    print(f"周期: {timeframe}")
-    print(f"样本区间: {valid['date'].iloc[0]} -> {valid['date'].iloc[-1]}")
-    print()
-    print("总体")
-    print(f"总信号数: {total_signals}")
-    print(f"总命中数: {total_hits}")
-    print(f"总体命中率: {hit_ratio(total_hits, total_signals):.2f}%")
-    print()
-    print("背景过滤")
-    print(
-        "UP allow/reduce/block/missing: "
-        f"{int((valid['background_action_long'] == 'allow').sum())} / "
-        f"{int((valid['background_action_long'] == 'reduce').sum())} / "
-        f"{int((valid['background_action_long'] == 'block').sum())} / "
-        f"{int((valid['background_action_long'] == 'missing').sum())}"
-    )
-    print(
-        "DOWN allow/reduce/block/missing: "
-        f"{int((valid['background_action_short'] == 'allow').sum())} / "
-        f"{int((valid['background_action_short'] == 'reduce').sum())} / "
-        f"{int((valid['background_action_short'] == 'block').sum())} / "
-        f"{int((valid['background_action_short'] == 'missing').sum())}"
-    )
-    print()
-    print("UP 信号")
-    print(f"信号数: {len(up_signals)}")
-    print(f"下一根上涨命中数: {up_hits}")
-    print(f"命中率: {hit_ratio(up_hits, len(up_signals)):.2f}%")
-    print()
-    print("DOWN 信号")
-    print(f"信号数: {len(down_signals)}")
-    print(f"下一根下跌命中数: {down_hits}")
-    print(f"命中率: {hit_ratio(down_hits, len(down_signals)):.2f}%")
-    print()
-
-    up_high = up_signals[up_signals["effective_size_factor_long"] >= 2.0]
-    down_high = down_signals[down_signals["effective_size_factor_short"] >= 2.0]
-
-    print("UP 高分组(size=2.0)")
-    print(f"信号数: {len(up_high)}")
-    print(f"命中率: {hit_ratio(int(up_high['next_is_up'].sum()), len(up_high)):.2f}%")
-    if len(up_high) > 0:
-        print(f"平均 score: {up_high['score_long'].mean():.4f}")
-    print()
-
-    print("DOWN 高分组(size=2.0)")
-    print(f"信号数: {len(down_high)}")
-    print(f"命中率: {hit_ratio(int(down_high['next_is_down'].sum()), len(down_high)):.2f}%")
-    if len(down_high) > 0:
-        print(f"平均 score: {down_high['score_short'].mean():.4f}")
-    print()
+    data_path: Path,
+    dataframe: pd.DataFrame,
+    summary: dict,
+) -> None:
+    print("=== CryptoReversal 现货信号统计 ===")
+    print_row("交易对", pair)
+    print_row("周期", timeframe)
+    print_row("数据文件", data_path)
+    if not dataframe.empty:
+        print_row("统计开始", dataframe.iloc[0]["date"])
+        print_row("统计结束", dataframe.iloc[-1]["date"])
+    print_row("K线数量", len(dataframe))
+    print_row("预热K线", summary["startup_candle_count"])
+    print_row("总触发次数", summary["total_signal_count"])
+    print_row("胜次数", summary["wins"])
+    print_row("负次数", summary["losses"])
+    print_row("胜率", f"{summary['win_rate_pct']:.2f}%")
 
 
 def main() -> int:
-    """脚本入口。
-
-    执行顺序固定为：
-
-    1. 可选下载数据
-    2. 读取本地 K 线
-    3. 计算信号
-    4. 输出下一根柱子方向命中率
-    """
-
-    args = build_cli_parser().parse_args()
-
-    freqtrade_root = freqtrade_root_dir()
-    project_root = freqtrade_root.parent.parent
-    config_path = freqtrade_root / "config.json"
-    user_dir = freqtrade_root / "user_data"
-    data_dir = user_dir / "data"
+    args = parse_args()
+    config = load_config(args.config)
+    pair, timeframe, exchange = resolve_market_settings(args, config)
+    timeframes = required_timeframes(timeframe)
+    eval_start, eval_end = parse_timerange(DEFAULT_TIMERANGE)
 
     if not args.skip_download:
-        ensure_data_downloaded(
-            project_root=project_root,
-            config_path=config_path,
-            user_dir=user_dir,
-            data_dir=data_dir,
-            pair=args.pair,
-            timeframe=args.timeframe,
-            timerange=args.timerange,
+        download_spot_data(
+            config_path=args.config,
+            userdir=args.userdir,
+            datadir=args.datadir,
+            exchange=exchange,
+            pair=pair,
+            timeframes=timeframes,
+            timerange=DEFAULT_TIMERANGE,
         )
 
-    frame = load_main_timeframe_frame(data_dir, args.pair, args.timeframe)
-    signal_frame = compute_signal_frame(frame)
-    signal_frame = apply_background_filter(signal_frame, args.timeframe)
-    print_summary(signal_frame, args.pair, args.timeframe)
+    data_path = resolve_ohlcv_file(args.datadir, pair, timeframe)
+    dataframe = load_timeframe_data(args.datadir, pair, timeframe)
+    profile = background_profile(timeframe)
+    background_fast = None
+    background_slow = None
+    if profile is not None:
+        background_fast = load_timeframe_data(args.datadir, pair, profile.fast_timeframe, dataframe)
+        background_slow = load_timeframe_data(args.datadir, pair, profile.slow_timeframe, dataframe)
+    signals, summary = evaluate_signals(
+        dataframe=dataframe,
+        timeframe=timeframe,
+        background_fast=background_fast,
+        background_slow=background_slow,
+        eval_start=eval_start,
+        eval_end=eval_end,
+    )
+
+    display_dataframe = filter_dataframe_by_timerange(dataframe, eval_start, eval_end)
+    print_summary(pair, timeframe, data_path, display_dataframe, summary)
+
+    if args.export_csv:
+        args.export_csv.parent.mkdir(parents=True, exist_ok=True)
+        signals.to_csv(args.export_csv, index=False)
+        print_row("导出明细 CSV", args.export_csv)
+
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

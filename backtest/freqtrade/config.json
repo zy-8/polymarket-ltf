@@ -1,15 +1,13 @@
 {
   "$schema": "https://schema.freqtrade.io/schema.json",
-  "dry_run": true,
-  "dry_run_wallet": 1000,
-  "max_open_trades": 3,
+  "max_open_trades": 1,
   "stake_currency": "USDT",
   "stake_amount": 100,
   "tradable_balance_ratio": 0.99,
   "fiat_display_currency": "USD",
   "timeframe": "5m",
-  "trading_mode": "futures",
-  "margin_mode": "isolated",
+  "strategy": "CryptoReversal",
+  "trading_mode": "spot",
   "cancel_open_orders_on_exit": false,
   "internals": {
     "process_throttle_secs": 5
@@ -26,13 +24,10 @@
   },
   "exchange": {
     "name": "binance",
-    "key": "",
-    "secret": "",
     "ccxt_config": {},
     "ccxt_async_config": {},
     "pair_whitelist": [
-      "BTC/USDT:USDT",
-      "ETH/USDT:USDT"
+      "BTC/USDT"
     ],
     "pair_blacklist": []
   },
@@ -40,6 +35,5 @@
     {
       "method": "StaticPairList"
     }
-  ],
-  "db_url": "sqlite:///backtest/freqtrade/user_data/tradesv3.sqlite"
+  ]
 }

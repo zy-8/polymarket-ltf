@@ -20,7 +20,7 @@
 
 - Rust 实时数据接入
 - snapshot 特征生成
-- Python 离线回测与批量评估
+- `crypto_reversal` 的 Freqtrade K 线研究与 hyperopt
 - 研究、结果和日志标准
 
 当前不应被描述为：
@@ -45,7 +45,7 @@
 - `examples/`
   最小可运行示例
 - `backtest/`
-  Python 回测与研究项目
+  `crypto_reversal` 的 Freqtrade 研究目录
 - `docs/`
   正式项目文档
 - `skills/`
@@ -55,9 +55,9 @@
 
 - 修改前先理解数据流、模块边界和字段语义。
 - 数据源逻辑放独立模块，不要把多交易所逻辑堆到 `main.rs`。
-- 离线回测策略放 `backtest/src/strategies/`，Rust 运行时策略放 `src/strategy/`。
+- `crypto_reversal` 的 K 线研究入口使用 `backtest/freqtrade/`。
+- Rust 运行时策略放 `src/strategy/`。
 - 回测和离线分析逻辑放在 `backtest/` 下，不要混入 Rust 实时层。
-- Python 回测入口支持 `--data-format` 和 `--strategy`，新增 loader 或策略时先走注册表。
 - 不要把尚未实现的能力写成既成事实。
 - snapshot 字段、CLI 行为、目录结构和结果格式变化时，必须同步更新文档。
 - 真实数据放 `data/`，不要塞进 `tests/fixtures/`。
@@ -78,10 +78,7 @@ Python:
 
 ```bash
 cd backtest
-PYTHONPATH=src python3 -m unittest discover -s tests
-PYTHONPATH=src python3 -m backtest --interval 5m
-PYTHONPATH=src python3 -m backtest --interval 15m
-PYTHONPATH=src python3 -m scan --csv tests/fixtures/sample.csv --top-k 1
+freqtrade backtesting --config freqtrade/config.json --userdir freqtrade/user_data --datadir freqtrade/user_data/data --strategy-path freqtrade/strategies --strategy CryptoReversal
 ```
 
 范围较大时再执行：

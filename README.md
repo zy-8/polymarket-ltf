@@ -9,7 +9,7 @@
 
 - 实时接入 Polymarket、CEX、oracle 等研究数据
 - 将多源数据聚合成稳定的 snapshot 研究输入
-- 对 snapshot 做离线回测、批量评估与策略验证
+- 对 `crypto_reversal` 做 Freqtrade backtesting、hyperopt 与策略验证
 - 沉淀研究、结果、日志和协作文档标准
 
 它适合被理解为：
@@ -33,8 +33,8 @@
 - Binance `bookTicker` 参考中间价
 - Chainlink RTDS 锚定价格
 - 秒级 snapshot 生成与 CSV 落盘
-- 基于 snapshot 的 Polymarket `up/down` 双腿回测
-- `5m` / `15m` 分组的中文回测汇总
+- `crypto_reversal` 的 Freqtrade K 线研究入口
+- `crypto_reversal` 的标准 backtesting 与 hyperopt 入口
 
 当前仓库还没有完整覆盖：
 
@@ -65,7 +65,7 @@
 ├── docs/          # 主文档目录，以 3 份核心文档为准
 ├── src/           # Rust 实时数据链路
 ├── examples/      # 最小可运行示例
-├── backtest/      # Python crypto 回测与研究项目
+├── backtest/      # crypto_reversal 的 Freqtrade 研究工作区
 ├── data/          # snapshot 输入与研究输出
 ├── skills/        # 项目内 skill
 ├── README.md
@@ -168,9 +168,12 @@ Python:
 
 ```bash
 cd backtest
-PYTHONPATH=src python3 -m backtest
-PYTHONPATH=src python3 -m scan --csv tests/fixtures/sample.csv --top-k 1
-PYTHONPATH=src python3 -m unittest discover -s tests
+freqtrade backtesting \
+  --config freqtrade/config.json \
+  --userdir freqtrade/user_data \
+  --datadir freqtrade/user_data/data \
+  --strategy-path freqtrade/strategies \
+  --strategy CryptoReversal
 ```
 
 ## 建议阅读顺序

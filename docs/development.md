@@ -119,22 +119,10 @@
 
 ### 3.2 Python 研究层
 
-- `backtest/src/data/`
-  文件格式与输入输出适配，含数据格式注册
-- `backtest/src/domain/`
-  领域模型与策略协议
-- `backtest/src/engine/`
-  回测核心逻辑
-- `backtest/src/reports/`
-  结果输出与报表结构
-- `backtest/src/strategies/`
-  策略信号实现与策略注册
-- `backtest/src/backtest.py`
-  单次回测入口
-- `backtest/src/scan.py`
-  参数扫描与 `pandas` 汇总入口
-- `backtest/src/report.py`
-  结构化结果再渲染入口
+- `backtest/freqtrade/config.json`
+  Freqtrade 下载数据、backtesting 和 hyperopt 的研究配置
+- `backtest/freqtrade/strategies/crypto_reversal.py`
+  `crypto_reversal` 的正式研究策略实现
 
 ### 3.3 文档与工作流层
 
@@ -193,12 +181,12 @@
 
 如果输出结构变化，应同步更新文档与测试。
 
-如果修改了 `--data-format`、`--strategy`、参数扫描口径或 loader / strategy 注册表，也必须同步更新 [backtest/README.md](../backtest/README.md)。
+如果修改了 `crypto_reversal` 的 Freqtrade 入口、策略参数、数据下载方式或研究命令，也必须同步更新 [backtest/README.md](../backtest/README.md) 和 `backtest/freqtrade/README.md`。
 
 ### 4.4 策略代码放置规则
 
-- 纯研究、纯回测策略：
-  放 `backtest/src/strategies/`
+- `crypto_reversal` 的 Binance K 线研究策略：
+  放 `backtest/freqtrade/strategies/`
 - Rust 运行时策略、执行候选或实时决策逻辑：
   放 `src/strategy/`
 
@@ -210,7 +198,7 @@
 但不要在策略目录里重复实现交易所连接客户端；  
 交易所连接、重连、订阅控制和本地缓存应继续收敛在各自的数据源模块内。
 
-不要把两类策略目录混用。  
+不要把 Freqtrade 研究策略和 Rust 运行时策略目录混用。  
 如果一个策略还没有脱离研究阶段，不要提前塞进 Rust 运行时目录。
 
 ### 4.5 修改热点路径
@@ -346,11 +334,9 @@
 
 ```bash
 cd backtest
-PYTHONPATH=src python3 -m backtest
-PYTHONPATH=src python3 -m backtest --interval 5m
-PYTHONPATH=src python3 -m backtest --interval 15m
-PYTHONPATH=src python3 -m scan --csv tests/fixtures/sample.csv --top-k 1
-PYTHONPATH=src python3 -m unittest discover -s tests
+python3 freqtrade/signal_eval.py --skip-download
+freqtrade backtesting --config freqtrade/config.json --userdir freqtrade/user_data --datadir freqtrade/user_data/data --strategy-path freqtrade/strategies --strategy CryptoReversal
+freqtrade hyperopt --config freqtrade/config.json --userdir freqtrade/user_data --datadir freqtrade/user_data/data --strategy-path freqtrade/strategies --strategy CryptoReversal --spaces buy
 ```
 
 提交前至少应执行：

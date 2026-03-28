@@ -1,4 +1,0 @@
-timestamp,binance_mid_price,chainlink_price,spread_binance_chainlink,spread_delta,chainlink_start_delta,up_bid_price,up_bid_size,up_ask_price,up_ask_size,down_bid_price,down_bid_size,down_ask_price,down_ask_size,z_score,vel_spread,up_mid_price_slope,binance_sigma,chainlink_change_30s_pct,chainlink_change_60s_pct,chainlink_run
-2026-03-20 10:00:00.000,85000,84990,10,1,0,0.48,100,0.52,100,0.47,100,0.53,100,-1.8,0.1,0.0,12,0.1,0.2,1
-2026-03-20 10:00:01.000,85001,84991,10,0,1,0.54,100,0.56,100,0.44,100,0.46,100,0.1,0.0,0.0,12,0.1,0.2,1
-2026-03-20 10:00:02.000,85002,84992,10,0,2,0.58,100,0.60,100,0.40,100,0.42,100,1.9,0.0,0.0,12,0.1,0.2,1

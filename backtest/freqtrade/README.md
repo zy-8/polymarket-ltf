@@ -1,167 +1,137 @@
-# Freqtrade Research Adapter
+# Freqtrade
 
-`backtest/freqtrade/` 现在主要用于做一件事：
+`backtest/freqtrade/` 用来跑 `crypto_reversal` 的回测数据。
 
-- 评估 `crypto_reversal` 信号，对“下一根柱子涨跌方向”的命中率
+这里的 Freqtrade 只承担：
 
-这里不是正式的 Polymarket 回测系统，也不是 Rust runtime 的执行模拟。
+- 现货 OHLCV 数据下载
+- backtesting
+- hyperopt
+- 信号触发统计
 
-## 目录结构
+这里不承担：
+
+- `freqtrade trade`
+- 实盘交易
+- 模拟交易
+
+信号计算参考 Rust：
+
+- `src/strategy/crypto_reversal/model.rs`
+
+过滤条件参考 Rust：
+
+- `src/strategy/crypto_reversal/service.rs`
+
+## 目录
 
 ```text
 backtest/freqtrade/
 ├── README.md
 ├── config.json
-├── signal_eval.py
 ├── strategies/
-│   └── CryptoReversalHyperopt.py
+│   └── crypto_reversal.py
 └── user_data/
-    ├── data/
-    ├── backtest_results/
-    └── hyperopt_results/
 ```
 
-## 现在各文件是干什么的
-
-- `signal_eval.py`
-  这是当前主入口。
-  它读取 Binance futures K 线，计算 `UP / DOWN` 信号，并纳入背景周期过滤，然后统计：
-  当前柱子出信号后，下一根柱子方向是否命中。
-
-- `strategies/CryptoReversalHyperopt.py`
-  这是保留给 Freqtrade strategy / hyperopt 使用的策略定义文件。
-  它不再承担你平时直接运行的主入口职责。
+## 文件
 
 - `config.json`
-  Freqtrade 下载数据时使用的最小配置。
+  面向数据下载、回测和 hyperopt 的研究配置
+- `strategies/crypto_reversal.py`
+  `crypto_reversal` 的正式研究策略实现
 
-- `user_data/`
-  Freqtrade 的本地工作目录：
-  数据下载到这里，其他实验产物也放这里。
+## 默认口径
 
-## 当前研究口径
+- 交易模式：`spot`
+- 交易对：`BTC/USDT`
+- 周期：`5m`
+- 研究策略名：`CryptoReversal`
+- 最大同时持仓：`1`（仅用于回测约束）
+- 单笔 stake：`100 USDT`（Freqtrade 的固定字段名，这里仅表示回测资金配置）
+- 时间范围示例：最近一年 `20250328-20260328`
 
-当前脚本研究的是：
+## 命令
 
-- 当前这根 5m 柱子收盘时，如果出现 `UP` 信号
-- 那么下一根 5m 柱子最终是否上涨
+这里不再维护 `backtest/scripts/` 包装脚本。  
+请直接执行下面这些研究命令，也不要把这个目录当成交易入口。
 
-以及：
-
-- 当前这根 5m 柱子收盘时，如果出现 `DOWN` 信号
-- 那么下一根 5m 柱子最终是否下跌
-
-所以这里看的不是：
-
-- 开仓价
-- 平仓价
-- 盈亏
-- 回撤
-
-而是：
-
-- `UP` 命中率
-- `DOWN` 命中率
-- 总体命中率
-- 高分组命中率
-
-## 背景过滤
-
-当前 `signal_eval.py` 已经补入 Rust `crypto_reversal/service.rs` 的背景过滤逻辑。
-
-对 `5m` 主周期：
-
-- 主信号使用 `5m`
-- 背景过滤使用 `15m + 1h`
-
-对 `15m` 主周期：
-
-- 主信号使用 `15m`
-- 背景过滤使用 `1h + 4h`
-
-背景过滤结果分为：
-
-- `allow`
-- `reduce`
-- `block`
-
-其中：
-
-- `block` 的信号会被排除，不计入最终有效信号统计
-- `reduce` 的信号会保留
-- 当前脚本还会把 `allow / reduce / block / missing` 的数量打印出来
-
-## 研究边界
-
-这里复刻的是 `src/strategy/crypto_reversal/model.rs` 的 K 线信号层，包括：
-
-- RSI
-- Bollinger Bands
-- MACD histogram
-- reversal entry 条件
-- score / size_factor 的近似表达
-
-这里不复刻：
-
-- Polymarket next market 选择
-- registry 可交易性检查
-- Polymarket 下单与执行约束
-- Rust runtime 的账户状态协同
-
-## 安装
-
-你可以直接用项目现有 `.venv`，只要里面已经安装了 `freqtrade`。
-
-如果还没装：
+下载数据：
 
 ```bash
-source .venv/bin/activate
-python3 -m pip install -U pip
-python3 -m pip install freqtrade
+cd backtest
+freqtrade download-data \
+  --config freqtrade/config.json \
+  --userdir freqtrade/user_data \
+  --datadir freqtrade/user_data/data \
+  --timeframes 5m \
+  --timerange 20250328-20260328
 ```
 
-## 最常用命令
-
-如果本地已经有数据，直接跑：
+典型的下载 + 回测流程：
 
 ```bash
-source .venv/bin/activate
-python backtest/freqtrade/signal_eval.py --skip-download
+cd backtest
+freqtrade download-data \
+  --config freqtrade/config.json \
+  --userdir freqtrade/user_data \
+  --datadir freqtrade/user_data/data \
+  --timeframes 5m \
+  --timerange 20250328-20260328
+
+freqtrade backtesting \
+  --config freqtrade/config.json \
+  --userdir freqtrade/user_data \
+  --datadir freqtrade/user_data/data \
+  --strategy-path freqtrade/strategies \
+  --strategy CryptoReversal \
+  --timerange 20250328-20260328
 ```
 
-如果本地没有数据，就让脚本自动下载再评估：
+信号统计：
 
 ```bash
-source .venv/bin/activate
-python backtest/freqtrade/signal_eval.py
+cd backtest
+python3 freqtrade/signal_eval.py
 ```
 
-如果只想换交易对或时间范围：
+如果本地已经有数据，不想重复下载：
 
 ```bash
-python backtest/freqtrade/signal_eval.py \
-  --pair BTC/USDT:USDT \
-  --timeframe 5m \
-  --timerange 20240101-20241231
+cd backtest
+python3 freqtrade/signal_eval.py --skip-download
 ```
 
-## 输出结果
+这个脚本会直接输出：
 
-`signal_eval.py` 会直接在终端打印：
+- 周期过滤后的触发次数
+- 胜次数
+- 负次数
+- 胜率
 
-- 总信号数
-- 总体命中率
-- 背景过滤下 `allow / reduce / block / missing` 的数量
-- `UP` 信号数和命中率
-- `DOWN` 信号数和命中率
-- 高分组 `size=2.0` 的命中率
+回测：
 
-## 如果以后还要用 Freqtrade strategy
+```bash
+cd backtest
+freqtrade backtesting \
+  --config freqtrade/config.json \
+  --userdir freqtrade/user_data \
+  --datadir freqtrade/user_data/data \
+  --strategy-path freqtrade/strategies \
+  --strategy CryptoReversal \
+  --timerange 20250328-20260328
+```
 
-如果你后面还想继续做 Freqtrade 的策略实验或 hyperopt，可以继续用：
+参数搜索：
 
-- `strategies/CryptoReversalHyperopt.py`
-
-但对你当前这个项目目标来说，平时优先使用：
-
-- `signal_eval.py`
+```bash
+cd backtest
+freqtrade hyperopt \
+  --config freqtrade/config.json \
+  --userdir freqtrade/user_data \
+  --datadir freqtrade/user_data/data \
+  --strategy-path freqtrade/strategies \
+  --strategy CryptoReversal \
+  --spaces buy \
+  --timerange 20250328-20260328
+```

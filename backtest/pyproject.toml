@@ -1,7 +1,7 @@
 [project]
 name = "polymarket-ltf-backtest"
 version = "0.1.0"
-description = "Crypto backtesting and research utilities for polymarket-ltf snapshot data"
+description = "Freqtrade workspace for crypto_reversal research in polymarket-ltf"
 requires-python = ">=3.9"
 dependencies = [
     "pandas>=2.0",
@@ -9,12 +9,6 @@ dependencies = [
 authors = [
     { name = "polymarket-ltf" },
 ]
-
-[project.scripts]
-backtest = "backtest:main"
-scan = "scan:main"
-report = "report:main"
-auto-job = "auto_job:main"
 
 [project.optional-dependencies]
 reports = [
@@ -24,10 +18,3 @@ reports = [
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-py-modules = ["auto_job", "backtest", "report", "scan", "crypto_reversal_eval", "engine", "models", "reporting", "snapshot_io", "strategy_lib"]
-
-[tool.setuptools.packages.find]
-where = ["src"]

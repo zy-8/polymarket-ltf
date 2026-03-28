@@ -148,14 +148,8 @@ L3 数据边界
   └── data/snapshots/<symbol>/<interval>/<market_slug>.csv
 
 L4 离线研究层（Python）
-  ├── backtest/src/data/
-  ├── backtest/src/domain/
-  ├── backtest/src/engine/
-  ├── backtest/src/reports/
-  ├── backtest/src/strategies/
-  ├── backtest/src/backtest.py
-  ├── backtest/src/scan.py
-  └── backtest/src/report.py
+  ├── backtest/freqtrade/config.json
+  └── backtest/freqtrade/strategies/crypto_reversal.py
 
 L5 未来扩展层
   ├── backtest reports
@@ -190,16 +184,13 @@ Chainlink RTDS ----------┘
 data/snapshots/...csv
         │
         ▼
-backtest/src/data/
+backtest/freqtrade/
         │
         ▼
-backtest/src/engine/
+backtesting / hyperopt
         │
         ▼
-backtest/src/strategies/
-        │
-        ▼
-CLI 汇总 / 结果文件 / 未来研究报表
+研究输出 / 参数搜索 / 未来研究报表
 ```
 
 ### 6.5 核心模块
@@ -252,10 +243,10 @@ src/strategy/
   Rust 侧策略目录，预留给运行时策略或执行候选逻辑
 
 backtest/
-  离线回测、批量评估、研究输出
+  `crypto_reversal` 的 Freqtrade 研究目录
 
-backtest/src/strategies/
-  Python 回测策略目录
+backtest/freqtrade/strategies/
+  `crypto_reversal` 的 Freqtrade strategy 目录
 
 data/
   snapshot 输入与后续研究结果
