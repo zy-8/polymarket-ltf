@@ -411,6 +411,9 @@ dashboard 当前只对外暴露 `info` 消息形状。
 
 其中 `timestamp` 表示本地抓取这条 closed position 快照的时间，不表示成交时间或市场结算原始时间。
 
+`strategy.outcome` 的最终补写也依赖这批 `redeemable=true` 的 positions：
+只有当本地抓到已结算仓位后，才会根据 `positions.outcome + curPrice` 推导最终胜方并写回 `strategy`。
+
 面板只展示能匹配到本地 `strategy` 记录的 closed position，不展示账户里无归因的其他已结算仓位。
 
 历史记录通过 `/api/positions-page?strategy=...` 按需读取；

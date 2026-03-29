@@ -239,30 +239,6 @@ impl Store {
         .await
     }
 
-    pub async fn select_pending_strategy_outcomes(&self) -> Result<Vec<String>> {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT market_slug
-             FROM strategy
-             WHERE TRIM(outcome) = ''
-               AND (
-                   created_at
-                   + CASE interval
-                       WHEN '5m' THEN 300000
-                       WHEN '15m' THEN 900000
-                       ELSE 0
-                     END
-               ) <= ?1
-             ORDER BY created_at DESC",
-        )
-        .bind(now_ms)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            PolyfillError::internal_simple(format!("读取待补 outcome 的 strategy 失败: {error}"))
-        })
-    }
-
     pub async fn update_strategy_outcomes(
         &self,
         outcomes: &std::collections::HashMap<String, String>,
@@ -1307,54 +1283,6 @@ mod tests {
         assert_eq!(stats.strategies[0].trigger_count, 2);
         assert_eq!(stats.strategies[0].closed_count, 1);
         assert_eq!(stats.strategies[0].today_closed_count, 1);
-    }
-
-    #[tokio::test]
-    async fn select_pending_strategy_outcomes_only_returns_settled_markets() {
-        let store = Store::open_memory()
-            .await
-            .expect("memory sqlite should open");
-        let now_ms = chrono::Utc::now().timestamp_millis();
-
-        store
-            .insert_strategy(&events::Strategy {
-                order_id: "order-5m-ready".to_string(),
-                asset_id: "asset-5m-ready".to_string(),
-                strategy: "crypto_reversal".to_string(),
-                symbol: "eth".to_string(),
-                interval: "5m".to_string(),
-                market_slug: "eth-updown-5m-ready".to_string(),
-                side: "up".to_string(),
-                outcome: String::new(),
-                created_at: now_ms - 600_000,
-                event: "{}".to_string(),
-            })
-            .await
-            .expect("ready strategy insert should work");
-
-        store
-            .insert_strategy(&events::Strategy {
-                order_id: "order-15m-early".to_string(),
-                asset_id: "asset-15m-early".to_string(),
-                strategy: "crypto_reversal".to_string(),
-                symbol: "eth".to_string(),
-                interval: "15m".to_string(),
-                market_slug: "eth-updown-15m-early".to_string(),
-                side: "down".to_string(),
-                outcome: String::new(),
-                created_at: now_ms - 120_000,
-                event: "{}".to_string(),
-            })
-            .await
-            .expect("early strategy insert should work");
-
-        let pending = store
-            .select_pending_strategy_outcomes()
-            .await
-            .expect("pending outcomes should load");
-
-        assert!(pending.iter().any(|slug| slug == "eth-updown-5m-ready"));
-        assert!(!pending.iter().any(|slug| slug == "eth-updown-15m-early"));
     }
 
     #[tokio::test]

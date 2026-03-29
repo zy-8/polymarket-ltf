@@ -340,6 +340,12 @@ flowchart TD
 - 当某期 market 从 registry 中消失后
 - 本地 open orders / positions 视图可以及时剔除已结束 market
 
+`user_task` 里的 outcome 同步也依赖 `redeemable=true` 的 positions 快照：
+
+- 先抓官方已结算仓位并写入 SQLite `positions`
+- 再根据 `positions.outcome` 和 `cur_price` 推导最终胜方
+- 最后仅对 `strategy.outcome = ''` 的记录做补写
+
 ## 7. 输入订阅逻辑
 
 运行时对 Binance 的真实输入只有 `kline`。
