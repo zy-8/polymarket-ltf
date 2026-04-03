@@ -21,13 +21,13 @@ LOG_DIR="${APP_DIR}/logs"
 usage() {
   cat <<'EOF'
 usage:
-  ./scripts/snapshot-write.sh start [symbol] [5m|15m|both] [output_dir]
+  ./scripts/snapshot-write.sh start [symbols] [5m|15m|both] [output_dir]
   ./scripts/snapshot-write.sh stop
   ./scripts/snapshot-write.sh status
 
 examples:
   ./scripts/snapshot-write.sh start
-  ./scripts/snapshot-write.sh start btc both data/snapshots
+  ./scripts/snapshot-write.sh start btc,eth,sol,xrp both data/snapshots
   ./scripts/snapshot-write.sh stop
 EOF
 }
@@ -39,7 +39,7 @@ is_running() {
 }
 
 start() {
-  SYMBOL="${1:-btc}"
+  SYMBOLS="${1:-btc,eth,sol,xrp}"
   INTERVAL="${2:-both}"
   OUTPUT_DIR="${3:-${APP_DIR}/data/snapshots}"
 
@@ -64,7 +64,7 @@ start() {
 
   echo "starting snapshot-write in background..."
   POLYMARKET_LTF_LOG_DIR="${LOG_DIR}" \
-    nohup "${BIN_PATH}" "${SYMBOL}" "${INTERVAL}" "${OUTPUT_DIR}" \
+    nohup "${BIN_PATH}" "${SYMBOLS}" "${INTERVAL}" "${OUTPUT_DIR}" \
     > /dev/null 2>&1 &
 
   pid="$!"

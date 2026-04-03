@@ -20,10 +20,10 @@ pub type Body = Full<Bytes>;
 const INDEX_HTML: &str = include_str!("../../dashboard/index.html");
 const APP_JS: &str = include_str!("../../dashboard/app.js");
 const STYLES_CSS: &str = include_str!("../../dashboard/styles.css");
-pub const DEFAULT_ADDR: &str = "0.0.0.0:3000";
-
 pub async fn spawn(handle: Handle) -> anyhow::Result<()> {
-    let addr: SocketAddr = DEFAULT_ADDR.parse()?;
+    let addr: SocketAddr = std::env::var("DASHBOARD_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+        .parse()?;
     let listener = TcpListener::bind(addr).await?;
 
     info!(addr = %addr, "dashboard web server started");

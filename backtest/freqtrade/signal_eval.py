@@ -332,6 +332,7 @@ def evaluate_background_action(
     profile: BackgroundProfile | None,
     background_fast: pd.DataFrame | None,
     background_slow: pd.DataFrame | None,
+    side: str = "up",
 ) -> str | None:
     if profile is None:
         return "allow"
@@ -346,6 +347,13 @@ def evaluate_background_action(
 
     change_fast = percent_change(float(fast.iloc[0]["close"]), float(fast.iloc[-1]["close"]))
     change_slow = percent_change(float(slow.iloc[0]["close"]), float(slow.iloc[-1]["close"]))
+
+    if side == "down":
+        if change_fast >= profile.block_fast_pct and change_slow >= profile.block_slow_pct:
+            return "block"
+        if change_fast >= profile.reduce_fast_pct or change_slow >= profile.reduce_slow_pct:
+            return "reduce"
+        return "allow"
 
     if change_fast <= -profile.block_fast_pct and change_slow <= -profile.block_slow_pct:
         return "block"
@@ -373,6 +381,7 @@ def evaluate_signals(
     warmup_signal_count = int((signal_series.iloc[:startup_candle_count] == 1).sum())
     dropped_tail_signals = 0
     blocked_signal_count = 0
+    reduced_signal_count = 0
     background_missing_count = 0
     trigger_count = 0
     profile = background_profile(timeframe)
@@ -393,6 +402,7 @@ def evaluate_signals(
             profile=profile,
             background_fast=background_fast,
             background_slow=background_slow,
+            side="up",
         )
         if action is None:
             background_missing_count += 1
@@ -400,6 +410,8 @@ def evaluate_signals(
         if action == "block":
             blocked_signal_count += 1
             continue
+        if action == "reduce":
+            reduced_signal_count += 1
 
         trigger_count += 1
         if index + 1 >= len(enriched):
@@ -410,6 +422,9 @@ def evaluate_signals(
         entry_price = float(row["close"])
         exit_price = float(exit_row["close"])
         pnl_pct = ((exit_price / entry_price) - 1.0) * 100.0
+        effective_size_factor = float(row["size_factor_long"])
+        if action == "reduce" and profile is not None:
+            effective_size_factor *= profile.reduce_factor
 
         if pnl_pct > 0:
             outcome = "win"
@@ -432,6 +447,7 @@ def evaluate_signals(
                 "bb_width_pct": float(row["bb_width_pct"]),
                 "score_long": float(row["score_long"]),
                 "size_factor_long": float(row["size_factor_long"]),
+                "effective_size_factor_long": effective_size_factor,
                 "background_action": action,
                 "enter_tag": row.get("enter_tag"),
             }
@@ -452,6 +468,7 @@ def evaluate_signals(
         "warmup_signal_count": warmup_signal_count,
         "total_signal_count": trigger_count,
         "blocked_signal_count": blocked_signal_count,
+        "reduced_signal_count": reduced_signal_count,
         "background_missing_count": background_missing_count,
         "completed_signals": completed_signals,
         "dropped_tail_signals": dropped_tail_signals,
@@ -485,6 +502,9 @@ def print_summary(
     print_row("K线数量", len(dataframe))
     print_row("预热K线", summary["startup_candle_count"])
     print_row("总触发次数", summary["total_signal_count"])
+    print_row("背景减仓次数", summary["reduced_signal_count"])
+    print_row("背景阻止次数", summary["blocked_signal_count"])
+    print_row("背景缺数次数", summary["background_missing_count"])
     print_row("胜次数", summary["wins"])
     print_row("负次数", summary["losses"])
     print_row("胜率", f"{summary['win_rate_pct']:.2f}%")

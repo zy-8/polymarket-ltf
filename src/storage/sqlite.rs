@@ -261,6 +261,21 @@ impl Store {
         Ok(())
     }
 
+    /// 返回 strategy 表中 outcome 仍为空的去重 market_slug 列表。
+    pub async fn pending_outcome_slugs(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT DISTINCT market_slug FROM strategy WHERE TRIM(outcome) = ''")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| {
+                PolyfillError::internal_simple(format!("查询 pending outcome slugs 失败: {error}"))
+            })?;
+
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<String, _>("market_slug"))
+            .collect())
+    }
+
     pub async fn insert_positions(&self, positions: &[Position]) -> Result<()> {
         self.insert_positions_at(positions, chrono::Utc::now().timestamp_millis())
             .await

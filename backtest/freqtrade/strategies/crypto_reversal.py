@@ -3,9 +3,38 @@ from __future__ import annotations
 from functools import reduce
 
 import numpy as np
-import talib.abstract as ta
+import pandas as pd
 from freqtrade.strategy import DecimalParameter, IStrategy, IntParameter
 from pandas import DataFrame
+
+
+def rsi(series: pd.Series, period: int) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    value = 100.0 - (100.0 / (1.0 + rs))
+    return value.fillna(100.0).where(avg_loss != 0.0, 100.0).where(avg_gain != 0.0, 0.0)
+
+
+def bbands(series: pd.Series, period: int, stddev: float) -> tuple[pd.Series, pd.Series, pd.Series]:
+    middle = series.rolling(window=period, min_periods=period).mean()
+    rolling_std = series.rolling(window=period, min_periods=period).std(ddof=0)
+    upper = middle + (rolling_std * stddev)
+    lower = middle - (rolling_std * stddev)
+    return upper, middle, lower
+
+
+def macd_hist(series: pd.Series, fast: int, slow: int, signal: int) -> pd.Series:
+    ema_fast = series.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = series.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    return macd_line - signal_line
 
 
 class CryptoReversal(IStrategy):
@@ -28,10 +57,6 @@ class CryptoReversal(IStrategy):
     can_short = False
     timeframe = "5m"
 
-    # 对齐 Rust `min_bars()` 的最小热身口径：
-    # max(rsi_period + 1, bb_period, max(macd_fast, macd_slow) + macd_signal, warmup_bars + 2)
-    startup_candle_count = 128
-
     minimal_roi = {"0": 10.0}
     stoploss = -0.99
     trailing_stop = False
@@ -39,6 +64,9 @@ class CryptoReversal(IStrategy):
     use_exit_signal = True
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
+
+    # Rust `default_model_config()` 默认参数。
+    warmup_bars = 100
 
     # 第一阶段优先搜索入场阈值，不先把指标窗口一起放开。
     long_rsi_max = IntParameter(30, 45, default=40, space="buy")
@@ -60,6 +88,15 @@ class CryptoReversal(IStrategy):
     add_score = 0.32
     max_score = 0.50
 
+    # 对齐 Rust `min_bars()`：
+    # max(rsi_period + 1, bb_period, max(macd_fast, macd_slow) + macd_signal, warmup_bars + 2)
+    startup_candle_count = max(
+        14 + 1,
+        30,
+        max(12, 26) + 9,
+        warmup_bars + 2,
+    )
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """计算与 Rust 信号模型对应的指标列和派生分数列。"""
 
@@ -70,28 +107,23 @@ class CryptoReversal(IStrategy):
         short_rsi_min = float(self.short_rsi_min.value)
         band_pad_pct = float(self.band_pad_pct.value)
 
-        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=rsi_period)
+        dataframe["rsi"] = rsi(dataframe["close"], period=rsi_period)
 
-        # `talib.abstract` 在不同输入形状下，返回值可能是 tuple / list，
-        # 这里显式解包，避免按字典键访问导致兼容性问题。
-        bb_upper, bb_middle, bb_lower = ta.BBANDS(
+        bb_upper, bb_middle, bb_lower = bbands(
             dataframe["close"],
-            timeperiod=bb_period,
-            nbdevup=bb_stddev,
-            nbdevdn=bb_stddev,
-            matype=0,
+            period=bb_period,
+            stddev=bb_stddev,
         )
         dataframe["bb_upper"] = bb_upper
         dataframe["bb_middle"] = bb_middle
         dataframe["bb_lower"] = bb_lower
 
-        _macd_line, _macd_signal, macd_hist = ta.MACD(
+        dataframe["macdhist"] = macd_hist(
             dataframe["close"],
-            fastperiod=self.macd_fast,
-            slowperiod=self.macd_slow,
-            signalperiod=self.macd_signal,
+            fast=self.macd_fast,
+            slow=self.macd_slow,
+            signal=self.macd_signal,
         )
-        dataframe["macdhist"] = macd_hist
 
         # 布林带宽度按百分比表达，和 Rust `bb_width_pct` 保持同一语义。
         basis = dataframe["bb_middle"].replace(0, np.nan)

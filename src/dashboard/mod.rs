@@ -11,8 +11,6 @@ mod http;
 
 pub use api::Handle;
 
-pub const DEFAULT_ADDR: &str = http::DEFAULT_ADDR;
-
 pub async fn start() -> anyhow::Result<Handle> {
     let handle = Handle::new();
     http::spawn(handle.clone()).await?;

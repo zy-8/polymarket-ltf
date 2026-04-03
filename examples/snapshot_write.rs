@@ -28,22 +28,29 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let symbol = args
-        .next()
-        .as_deref()
-        .unwrap_or("btc")
-        .parse::<Symbol>()
-        .map_err(anyhow::Error::from)?;
-    let intervals = parse_intervals(args.next().as_deref().unwrap_or("both"))?;
-    let output_dir = PathBuf::from(args.next().unwrap_or_else(|| "data/snapshots".to_string()));
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let symbols = [symbol];
+    // 解析参数：[symbols] [interval] [output_dir]
+    // symbols 用逗号分隔，例如 "btc,eth,sol,xrp"
+    let symbols: Vec<Symbol> = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("btc,eth,sol,xrp")
+        .split(',')
+        .map(|s| s.trim().parse::<Symbol>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::from)?;
+    let intervals = parse_intervals(args.get(1).map(|s| s.as_str()).unwrap_or("both"))?;
+    let output_dir = PathBuf::from(
+        args.get(2)
+            .cloned()
+            .unwrap_or_else(|| "data/snapshots".to_string()),
+    );
 
     let registry = Arc::new(RwLock::new(MarketRegistry::new()));
     let gamma = GammaClient::default();
     let initial = refresh_registry(&registry, &gamma, &symbols, &intervals).await?;
-    info!(initial, ?symbol, ?intervals, output_dir = %output_dir.display(), "Initial market registry refresh loaded");
+    info!(initial, ?symbols, ?intervals, output_dir = %output_dir.display(), "Initial market registry refresh loaded");
 
     let _registry_task = spawn_auto_refresh(Arc::clone(&registry), &symbols, &intervals);
 
@@ -67,15 +74,17 @@ async fn run() -> Result<()> {
     );
 
     loop {
-        for interval in &intervals {
-            match snapshot.write_csv(symbol, *interval, &output_dir)? {
-                Some(_row) => {}
-                None => {
-                    info!(
-                        ?symbol,
-                        ?interval,
-                        "Snapshot skipped because current market data is incomplete"
-                    );
+        for &symbol in &symbols {
+            for interval in &intervals {
+                match snapshot.write_csv(symbol, *interval, &output_dir)? {
+                    Some(_row) => {}
+                    None => {
+                        info!(
+                            ?symbol,
+                            ?interval,
+                            "Snapshot skipped because current market data is incomplete"
+                        );
+                    }
                 }
             }
         }
