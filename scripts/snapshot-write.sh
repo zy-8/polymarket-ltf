@@ -62,6 +62,9 @@ start() {
   mkdir -p "${LOG_DIR}"
   mkdir -p "${OUTPUT_DIR}"
 
+  # 提高文件描述符上限，避免 WS 重连 + reqwest 连接池 + 日志 + CSV 瞬时打开撞到默认 1024
+  ulimit -n 65535 2>/dev/null || true
+
   echo "starting snapshot-write in background..."
   POLYMARKET_LTF_LOG_DIR="${LOG_DIR}" \
     nohup "${BIN_PATH}" "${SYMBOLS}" "${INTERVAL}" "${OUTPUT_DIR}" \

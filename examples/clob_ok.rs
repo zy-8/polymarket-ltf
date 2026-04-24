@@ -1,12 +1,14 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy_signer::Signer as _;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, anyhow};
+use futures::future::try_join_all;
 use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::gamma::Client as GammaClient;
+use polymarket_client_sdk::types::U256;
 use polymarket_ltf::config::AppConfig;
 use polymarket_ltf::polymarket::market_registry::next_active_market;
 use polymarket_ltf::polymarket::types::open_orders::Order;
@@ -20,13 +22,34 @@ use tracing::{info, warn};
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 
+struct Leg {
+    label: &'static str,
+    token_id: U256,
+    price: Decimal,
+}
+
+struct Target {
+    symbol: Symbol,
+    market_slug: String,
+    legs: [Leg; 2],
+}
+
+struct Args {
+    symbols: Vec<Symbol>,
+    side: Side,
+    size: Decimal,
+    up_price: Decimal,
+    down_price: Decimal,
+    order_type: OrderType,
+    poll_interval: Duration,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     polymarket_ltf::init_process()?;
     let config = AppConfig::load().map_err(anyhow::Error::from)?;
     let trading = &config.trading;
-    let (symbols, side, size, up_price, down_price, order_type, poll_interval) =
-        parse_args(&trading.symbols)?;
+    let args = parse_args(&trading.symbols)?;
     let signer = load_signer(&trading.private_key)?;
     let client = Client::new(&trading.host, Config::default())?
         .authentication_builder(&signer)
@@ -36,113 +59,146 @@ async fn main() -> Result<()> {
         .context("Polymarket CLOB 鉴权失败")?;
     let gamma = GammaClient::default();
     let interval = Interval::M5;
-    let mut targets = Vec::with_capacity(symbols.len());
-    let mut submitted = Vec::new();
 
-    for symbol in symbols {
-        let market_slug = next_slug(symbol, interval)?;
-        let [up_asset_id, down_asset_id] = next_active_market(&gamma, symbol, interval)
-            .await?
-            .ok_or_else(|| anyhow!("下一个 5 分钟 market 不存在: {}", market_slug))?;
-        targets.push((symbol, market_slug, up_asset_id, down_asset_id));
-    }
-
+    let targets = discover_targets(&gamma, interval, &args).await?;
     let user = UserClient::start(&client).await?;
 
-    for (symbol, market_slug, up_asset_id, down_asset_id) in targets {
+    let legs: Vec<&Leg> = targets.iter().flat_map(|t| t.legs.iter()).collect();
+
+    let warmup_start = Instant::now();
+    tokio::try_join!(
+        try_join_all(legs.iter().map(|leg| client.fee_rate_bps(leg.token_id))),
+        try_join_all(legs.iter().map(|leg| client.tick_size(leg.token_id))),
+    )?;
+    info!(
+        warmup_ms = warmup_start.elapsed().as_secs_f64() * 1000.0,
+        asset_pairs = targets.len(),
+        "预热 fee_rate_bps / tick_size 缓存完成"
+    );
+
+    for target in &targets {
         info!(
-            symbol = ?symbol,
+            symbol = ?target.symbol,
             interval = ?interval,
-            market_slug = %market_slug,
-            side = ?side,
-            up_asset_id = %up_asset_id,
-            down_asset_id = %down_asset_id,
-            up_price = %up_price,
-            down_price = %down_price,
-            size = %size,
+            market_slug = %target.market_slug,
+            side = ?args.side,
+            up_asset_id = %target.legs[0].token_id,
+            down_asset_id = %target.legs[1].token_id,
+            up_price = %target.legs[0].price,
+            down_price = %target.legs[1].price,
+            size = %args.size,
             "准备挂下一个 5 分钟 market 双边限价单"
         );
+    }
 
-        let up_order = client
+    let total_start = Instant::now();
+
+    let build_start = Instant::now();
+    let orders = try_join_all(legs.iter().map(|leg| {
+        client
             .limit_order()
-            .order_type(order_type.clone())
-            .token_id(up_asset_id)
-            .side(side)
-            .price(up_price)
-            .size(size)
+            .order_type(args.order_type.clone())
+            .token_id(leg.token_id)
+            .side(args.side)
+            .price(leg.price)
+            .size(args.size)
             .build()
-            .await
-            .with_context(|| format!("构建 {} up 订单失败", symbol.as_slug()))?;
-        let down_order = client
-            .limit_order()
-            .order_type(order_type.clone())
-            .token_id(down_asset_id)
-            .side(side)
-            .price(down_price)
-            .size(size)
-            .build()
-            .await
-            .with_context(|| format!("构建 {} down 订单失败", symbol.as_slug()))?;
+    }))
+    .await
+    .context("构建订单失败")?;
+    let build_elapsed = build_start.elapsed();
 
-        let up_signed = client
-            .sign(&signer, up_order)
-            .await
-            .with_context(|| format!("{} up 订单签名失败", symbol.as_slug()))?;
-        let down_signed = client
-            .sign(&signer, down_order)
-            .await
-            .with_context(|| format!("{} down 订单签名失败", symbol.as_slug()))?;
-        let posts = client
-            .post_orders(vec![up_signed, down_signed])
-            .await
-            .with_context(|| format!("发送 {} 双边订单失败", symbol.as_slug()))?;
+    let sign_start = Instant::now();
+    let signed = try_join_all(orders.into_iter().map(|order| client.sign(&signer, order)))
+        .await
+        .context("订单签名失败")?;
+    let sign_elapsed = sign_start.elapsed();
 
-        for (label, post) in [("up", &posts[0]), ("down", &posts[1])] {
-            info!(
-                symbol = ?symbol,
-                side_label = label,
-                order_id = %post.order_id,
-                status = ?post.status,
+    let post_start = Instant::now();
+    let posts = client
+        .post_orders(signed)
+        .await
+        .context("发送订单失败")?;
+    let post_elapsed = post_start.elapsed();
+    let total_elapsed = total_start.elapsed();
+
+    info!(
+        order_count = posts.len(),
+        build_ms = build_elapsed.as_secs_f64() * 1000.0,
+        sign_ms = sign_elapsed.as_secs_f64() * 1000.0,
+        post_ms = post_elapsed.as_secs_f64() * 1000.0,
+        total_ms = total_elapsed.as_secs_f64() * 1000.0,
+        "下单延迟"
+    );
+
+    for ((target, leg), post) in targets
+        .iter()
+        .flat_map(|t| t.legs.iter().map(move |l| (t, l)))
+        .zip(posts.iter())
+    {
+        info!(
+            symbol = ?target.symbol,
+            side_label = leg.label,
+            order_id = %post.order_id,
+            status = ?post.status,
+            success = post.success,
+            trade_ids = ?post.trade_ids,
+            "Polymarket 订单已提交"
+        );
+
+        if post.order_id.trim().is_empty() {
+            warn!(
+                symbol = ?target.symbol,
+                side_label = leg.label,
                 success = post.success,
+                status = ?post.status,
                 trade_ids = ?post.trade_ids,
-                "Polymarket 订单已提交"
+                error_msg = ?post.error_msg,
+                "Polymarket 返回空 order_id，后续不会查询该订单状态"
             );
-            submitted.push(post.clone());
-
-            if post.order_id.trim().is_empty() {
-                warn!(
-                    symbol = ?symbol,
-                    side_label = label,
-                    success = post.success,
-                    status = ?post.status,
-                    trade_ids = ?post.trade_ids,
-                    error_msg = ?post.error_msg,
-                    "Polymarket 返回空 order_id，后续不会查询该订单状态"
-                );
-            }
         }
     }
 
-    if submitted.iter().all(|post| post.order_id.trim().is_empty()) {
-        warn!("本次下单返回的 order_id 为空，后续仅依赖用户 WS 更新挂单和持仓");
+    if posts.iter().all(|post| post.order_id.trim().is_empty()) {
+        warn!("本次下单返回的 order_id 全空，后续仅依赖用户 WS 更新挂单和持仓");
     }
 
-    monitor_state(&user, poll_interval).await?;
+    monitor_state(&user, args.poll_interval).await?;
 
     Ok(())
 }
 
-fn parse_args(
-    default_symbols: &[Symbol],
-) -> Result<(
-    Vec<Symbol>,
-    Side,
-    Decimal,
-    Decimal,
-    Decimal,
-    OrderType,
-    Duration,
-)> {
+async fn discover_targets(
+    gamma: &GammaClient,
+    interval: Interval,
+    args: &Args,
+) -> Result<Vec<Target>> {
+    try_join_all(args.symbols.iter().map(|&symbol| async move {
+        let market_slug = next_slug(symbol, interval)?;
+        let [up_asset_id, down_asset_id] = next_active_market(gamma, symbol, interval)
+            .await?
+            .ok_or_else(|| anyhow!("下一个 5 分钟 market 不存在: {}", market_slug))?;
+        Ok::<_, anyhow::Error>(Target {
+            symbol,
+            market_slug,
+            legs: [
+                Leg {
+                    label: "up",
+                    token_id: up_asset_id,
+                    price: args.up_price,
+                },
+                Leg {
+                    label: "down",
+                    token_id: down_asset_id,
+                    price: args.down_price,
+                },
+            ],
+        })
+    }))
+    .await
+}
+
+fn parse_args(default_symbols: &[Symbol]) -> Result<Args> {
     let mut args = std::env::args().skip(1);
 
     let symbols = match args.next() {
@@ -187,7 +243,7 @@ fn parse_args(
         None => DEFAULT_POLL_INTERVAL_SECS,
     });
 
-    Ok((
+    Ok(Args {
         symbols,
         side,
         size,
@@ -195,7 +251,7 @@ fn parse_args(
         down_price,
         order_type,
         poll_interval,
-    ))
+    })
 }
 
 fn parse_symbols(value: &str) -> Result<Vec<Symbol>> {
