@@ -10,9 +10,11 @@ use polymarket_ltf::polymarket::market_registry::{
 };
 use polymarket_ltf::polymarket::orderbook_stream::Client as OrderbookStreamClient;
 use polymarket_ltf::polymarket::rtds_stream::Client as RtdsStreamClient;
-use polymarket_ltf::snapshot::Snapshot;
+use polymarket_ltf::snapshot::SnapshotWriter;
 use polymarket_ltf::types::crypto::{Interval, Symbol};
-use tracing::{error, info};
+use tokio::task::JoinSet;
+use tokio::time::MissedTickBehavior;
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -30,8 +32,6 @@ async fn main() {
 async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // 解析参数：[symbols] [interval] [output_dir]
-    // symbols 用逗号分隔，例如 "btc,eth,sol,xrp"
     let symbols: Vec<Symbol> = args
         .first()
         .map(|s| s.as_str())
@@ -50,7 +50,13 @@ async fn run() -> Result<()> {
     let registry = Arc::new(RwLock::new(MarketRegistry::new()));
     let gamma = GammaClient::default();
     let initial = refresh_registry(&registry, &gamma, &symbols, &intervals).await?;
-    info!(initial, ?symbols, ?intervals, output_dir = %output_dir.display(), "Initial market registry refresh loaded");
+    info!(
+        initial,
+        ?symbols,
+        ?intervals,
+        output_dir = %output_dir.display(),
+        "Initial market registry refresh loaded"
+    );
 
     let _registry_task = spawn_auto_refresh(Arc::clone(&registry), &symbols, &intervals);
 
@@ -66,31 +72,48 @@ async fn run() -> Result<()> {
     binance.subscribe_books(&symbols)?;
     let chainlink = Arc::new(RtdsStreamClient::connect(&symbols)?);
 
-    let mut snapshot = Snapshot::new(
-        Arc::clone(&binance),
-        Arc::clone(&chainlink),
-        Arc::clone(&orderbook),
-        Arc::clone(&registry),
-    );
+    let mut tasks = JoinSet::new();
+    for &symbol in &symbols {
+        for &interval in &intervals {
+            let mut writer = SnapshotWriter::new(
+                symbol,
+                interval,
+                output_dir.clone(),
+                Arc::clone(&binance),
+                Arc::clone(&chainlink),
+                Arc::clone(&orderbook),
+                Arc::clone(&registry),
+            );
 
-    loop {
-        for &symbol in &symbols {
-            for interval in &intervals {
-                match snapshot.write_csv(symbol, *interval, &output_dir)? {
-                    Some(_row) => {}
-                    None => {
-                        info!(
-                            ?symbol,
-                            ?interval,
-                            "Snapshot skipped because current market data is incomplete"
-                        );
+            tasks.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+                loop {
+                    tick.tick().await;
+                    match writer.tick() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            info!(
+                                ?symbol,
+                                ?interval,
+                                "Snapshot skipped: market data incomplete"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(?symbol, ?interval, error = %err, "Snapshot tick failed");
+                        }
                     }
                 }
-            }
+            });
         }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
+
+    while let Some(Err(err)) = tasks.join_next().await {
+        warn!(error = %err, "Snapshot worker task ended unexpectedly");
+    }
+
+    Ok(())
 }
 
 fn parse_intervals(value: &str) -> Result<Vec<Interval>> {
