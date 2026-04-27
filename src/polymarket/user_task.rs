@@ -8,10 +8,9 @@ use rust_decimal::Decimal;
 use tokio::task::AbortHandle;
 use tracing::{info, warn};
 
-use crate::polymarket::relayer::{RelayerAction, RelayerService};
 use crate::strategy::StrategyContext;
 
-const AUTO_REDEEM_INTERVAL: Duration = Duration::from_secs(60);
+const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(500),
     Duration::from_secs(1),
@@ -20,8 +19,6 @@ const RETRY_DELAYS: [Duration; 3] = [
 
 pub fn user_task(context: StrategyContext) -> AbortHandle {
     tokio::spawn(async move {
-        let relayer = RelayerService::new(context.clone());
-
         loop {
             if let Err(error) = store_positions(&context).await {
                 warn!(
@@ -35,11 +32,7 @@ pub fn user_task(context: StrategyContext) -> AbortHandle {
                 warn!(error = %error, "strategy outcome backfill failed");
             }
 
-            if let Err(error) = auto_redeem(&relayer).await {
-                warn!(error = %error, "auto redeem failed");
-            }
-
-            tokio::time::sleep(AUTO_REDEEM_INTERVAL).await;
+            tokio::time::sleep(SYNC_INTERVAL).await;
         }
     })
     .abort_handle()
@@ -119,28 +112,6 @@ fn settled_outcome_from_market(market: &Market) -> Option<String> {
             "down" => Some("down".to_string()),
             _ => None,
         })
-}
-
-async fn auto_redeem(relayer: &RelayerService) -> crate::errors::Result<()> {
-    let tx = retry("auto redeem", || async {
-        relayer
-            .run(RelayerAction::Redeem)
-            .await
-            .map_err(|error| crate::errors::PolyfillError::internal_simple(format!("{error}")))
-    })
-    .await?;
-
-    if tx.transaction_id == "noop-no-redeemable-positions" {
-        Ok(())
-    } else {
-        info!(
-            transaction_id = %tx.transaction_id,
-            state = ?tx.state,
-            transaction_hash = ?tx.transaction_hash,
-            "auto redeem submitted"
-        );
-        Ok(())
-    }
 }
 
 async fn retry<F, Fut, T>(name: &str, mut op: F) -> crate::errors::Result<T>
