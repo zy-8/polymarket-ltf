@@ -26,8 +26,8 @@
 //! - `set_level(asset_id, side, price, size)`：单档更新
 
 use crate::errors::{PolyfillError, Result};
-pub use polymarket_client_sdk::clob::types::Side;
-use polymarket_client_sdk::types::U256;
+pub use polymarket_client_sdk_v2::clob::types::Side;
+use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap};
 

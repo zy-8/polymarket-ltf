@@ -14,7 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
-use polymarket_client_sdk::data::types::response::Position;
+use polymarket_client_sdk_v2::data::types::response::Position;
 use rust_decimal::Decimal;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, Row, SqlitePool};

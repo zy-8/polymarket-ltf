@@ -7,8 +7,8 @@
 //! - 策略归因事件 `Strategy`
 
 use chrono::Utc;
-use polymarket_client_sdk::auth::ApiKey;
-use polymarket_client_sdk::clob::{
+use polymarket_client_sdk_v2::auth::ApiKey;
+use polymarket_client_sdk_v2::clob::{
     types::{Side as MarketSide, TraderSide},
     ws::{OrderMessage, TradeMessage},
 };

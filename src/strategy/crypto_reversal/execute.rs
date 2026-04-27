@@ -17,12 +17,12 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use alloy_signer::Signer;
 use chrono::Utc;
-use polymarket_client_sdk::auth::{Normal, state::Authenticated};
-use polymarket_client_sdk::clob::Client as ClobClient;
-use polymarket_client_sdk::clob::types::OrderStatusType;
-use polymarket_client_sdk::clob::types::request::PriceRequest;
-use polymarket_client_sdk::clob::types::{Side as ClobSide, Side as MarketSide};
-use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk_v2::auth::{Normal, state::Authenticated};
+use polymarket_client_sdk_v2::clob::Client as ClobClient;
+use polymarket_client_sdk_v2::clob::types::OrderStatusType;
+use polymarket_client_sdk_v2::clob::types::request::PriceRequest;
+use polymarket_client_sdk_v2::clob::types::{Side as ClobSide, Side as MarketSide};
+use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use tracing::{info, warn};

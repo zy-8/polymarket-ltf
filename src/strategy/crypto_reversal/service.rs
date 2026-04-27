@@ -497,7 +497,7 @@ mod tests {
     use super::*;
     use crate::polymarket::utils::crypto_market::next_slug;
     use crate::strategy::crypto_reversal::model::Candle;
-    use polymarket_client_sdk::types::U256;
+    use polymarket_client_sdk_v2::types::U256;
 
     fn config() -> Config {
         Config {

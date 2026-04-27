@@ -9,7 +9,7 @@ use crate::strategy::crypto_reversal::model::Side;
 use crate::strategy::crypto_reversal::service::Candidate;
 use crate::types::crypto::Symbol;
 use chrono::{NaiveDate, Utc};
-use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -967,9 +967,9 @@ fn parse_strategy_signal(strategy: &events::Strategy) -> Option<SignalPayload> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use polymarket_client_sdk::clob::types::{OrderStatusType, Side as MarketSide};
-    use polymarket_client_sdk::data::types::response::Position as DataPosition;
-    use polymarket_client_sdk::types::{B256, U256};
+    use polymarket_client_sdk_v2::clob::types::{OrderStatusType, Side as MarketSide};
+    use polymarket_client_sdk_v2::data::types::response::Position as DataPosition;
+    use polymarket_client_sdk_v2::types::{B256, U256};
     use rust_decimal::Decimal;
 
     use super::Handle;

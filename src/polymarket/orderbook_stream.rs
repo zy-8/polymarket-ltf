@@ -22,8 +22,8 @@
 use crate::errors::{PolyfillError, Result};
 use crate::polymarket::types::orderbook::{BinaryOrderBook, Level, OrderBooks};
 use futures::StreamExt;
-use polymarket_client_sdk::clob::ws::{BookUpdate, Client as WsClient, PriceChange};
-use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk_v2::clob::ws::{BookUpdate, Client as WsClient, PriceChange};
+use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -257,12 +257,12 @@ fn rebuild_streams(
     desired_asset_ids: &mut HashSet<U256>,
     book_stream: &mut Option<
         std::pin::Pin<
-            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<BookUpdate>> + Send>,
+            Box<dyn futures::Stream<Item = polymarket_client_sdk_v2::Result<BookUpdate>> + Send>,
         >,
     >,
     price_stream: &mut Option<
         std::pin::Pin<
-            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<PriceChange>> + Send>,
+            Box<dyn futures::Stream<Item = polymarket_client_sdk_v2::Result<PriceChange>> + Send>,
         >,
     >,
 ) -> Result<()> {
@@ -301,10 +301,10 @@ fn rebuild_streams(
 async fn next_book_message(
     stream: &mut Option<
         std::pin::Pin<
-            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<BookUpdate>> + Send>,
+            Box<dyn futures::Stream<Item = polymarket_client_sdk_v2::Result<BookUpdate>> + Send>,
         >,
     >,
-) -> Option<polymarket_client_sdk::Result<BookUpdate>> {
+) -> Option<polymarket_client_sdk_v2::Result<BookUpdate>> {
     match stream.as_mut() {
         Some(stream) => stream.next().await,
         None => None,
@@ -314,10 +314,10 @@ async fn next_book_message(
 async fn next_price_message(
     stream: &mut Option<
         std::pin::Pin<
-            Box<dyn futures::Stream<Item = polymarket_client_sdk::Result<PriceChange>> + Send>,
+            Box<dyn futures::Stream<Item = polymarket_client_sdk_v2::Result<PriceChange>> + Send>,
         >,
     >,
-) -> Option<polymarket_client_sdk::Result<PriceChange>> {
+) -> Option<polymarket_client_sdk_v2::Result<PriceChange>> {
     match stream.as_mut() {
         Some(stream) => stream.next().await,
         None => None,
@@ -377,7 +377,7 @@ fn apply_price_change(books: &Arc<RwLock<OrderBooks>>, change: PriceChange) -> R
 
 fn try_apply_pair_fast_path(
     books: &mut OrderBooks,
-    price_changes: &[polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry],
+    price_changes: &[polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry],
 ) -> Result<bool> {
     let [first, second] = price_changes else {
         return Ok(false);
@@ -555,8 +555,8 @@ fn remove_markets(
 mod tests {
     use super::*;
     use crate::polymarket::types::orderbook::Side;
-    use polymarket_client_sdk::clob::ws::BookUpdate;
-    use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
+    use polymarket_client_sdk_v2::clob::ws::BookUpdate;
+    use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
 
     fn asset(id: u64) -> U256 {
         U256::from(id)
@@ -673,11 +673,11 @@ mod tests {
             .market([7; 32].into())
             .timestamp(101)
             .price_changes(vec![
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(45, 2))
                     .size(Decimal::new(90, 0))
-                    .side(polymarket_client_sdk::clob::types::Side::Buy)
+                    .side(polymarket_client_sdk_v2::clob::types::Side::Buy)
                     .hash("hash-2".to_string())
                     .build(),
             ])
@@ -723,10 +723,10 @@ mod tests {
             .market([7; 32].into())
             .timestamp(102)
             .price_changes(vec![
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(45, 2))
-                    .side(polymarket_client_sdk::clob::types::Side::Buy)
+                    .side(polymarket_client_sdk_v2::clob::types::Side::Buy)
                     .best_bid(Decimal::new(45, 2))
                     .best_ask(Decimal::new(56, 2))
                     .hash("hash-3".to_string())
@@ -755,13 +755,13 @@ mod tests {
             .market([7; 32].into())
             .timestamp(101)
             .price_changes(vec![
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(45, 2))
                     .size(Decimal::new(90, 0))
                     .side(Side::Buy)
                     .build(),
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(2))
                     .price(Decimal::new(55, 2))
                     .size(Decimal::new(90, 0))
@@ -810,13 +810,13 @@ mod tests {
             .market([7; 32].into())
             .timestamp(101)
             .price_changes(vec![
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(45, 2))
                     .size(Decimal::new(90, 0))
                     .side(Side::Buy)
                     .build(),
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(55, 2))
                     .size(Decimal::new(80, 0))
@@ -846,13 +846,13 @@ mod tests {
             .market([7; 32].into())
             .timestamp(101)
             .price_changes(vec![
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(1))
                     .price(Decimal::new(45, 2))
                     .size(Decimal::new(70, 0))
                     .side(Side::Buy)
                     .build(),
-                polymarket_client_sdk::clob::ws::types::response::PriceChangeBatchEntry::builder()
+                polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry::builder()
                     .asset_id(asset(2))
                     .price(Decimal::new(55, 2))
                     .size(Decimal::new(90, 0))

@@ -7,14 +7,14 @@
 //! - 本地状态只维护当前活跃挂单。
 
 use crate::errors::{PolyfillError, Result};
-use polymarket_client_sdk::auth::ApiKey;
-use polymarket_client_sdk::clob::ws::types::response::OrderMessageType;
-use polymarket_client_sdk::clob::{
+use polymarket_client_sdk_v2::auth::ApiKey;
+use polymarket_client_sdk_v2::clob::ws::types::response::OrderMessageType;
+use polymarket_client_sdk_v2::clob::{
     types::response::OpenOrderResponse,
     types::{OrderStatusType, Side},
     ws::{OrderMessage, TradeMessage},
 };
-use polymarket_client_sdk::types::{B256, U256};
+use polymarket_client_sdk_v2::types::{B256, U256};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -228,15 +228,15 @@ fn derive_open_order_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polymarket_client_sdk::auth::ApiKey;
-    use polymarket_client_sdk::clob::{
+    use polymarket_client_sdk_v2::auth::ApiKey;
+    use polymarket_client_sdk_v2::clob::{
         types::{OrderStatusType, OrderType, Side, TraderSide},
         ws::{
             OrderMessage, TradeMessage,
             types::response::{MakerOrder, TradeMessageStatus},
         },
     };
-    use polymarket_client_sdk::types::{Address, B256, U256, b256};
+    use polymarket_client_sdk_v2::types::{Address, B256, U256, b256};
 
     fn market() -> B256 {
         b256!("0000000000000000000000000000000000000000000000000000000000000001")

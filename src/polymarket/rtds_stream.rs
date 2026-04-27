@@ -6,8 +6,8 @@
 
 use crate::errors::{PolyfillError, Result};
 use crate::types::crypto::Symbol;
-use polymarket_client_sdk::rtds::Client as RtdsClient;
-use polymarket_client_sdk::rtds::types::response::ChainlinkPrice;
+use polymarket_client_sdk_v2::rtds::Client as RtdsClient;
+use polymarket_client_sdk_v2::rtds::types::response::ChainlinkPrice;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::task::AbortHandle;

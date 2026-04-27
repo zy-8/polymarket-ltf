@@ -13,17 +13,17 @@ use crate::polymarket::types::open_orders::{OpenOrders, Order};
 use crate::polymarket::types::positions::{FeeRule, Fill, Position, Positions};
 use crate::storage::sqlite;
 use futures::StreamExt;
-use polymarket_client_sdk::auth::{ApiKey, Credentials, Normal, state::Authenticated};
-use polymarket_client_sdk::clob::{
+use polymarket_client_sdk_v2::auth::{ApiKey, Credentials, Normal, state::Authenticated};
+use polymarket_client_sdk_v2::clob::{
     Client as ClobClient,
     types::{Side, TraderSide, request::OrdersRequest},
     ws::{ChannelType, Client as WsClient, WsMessage},
 };
-use polymarket_client_sdk::data::{
+use polymarket_client_sdk_v2::data::{
     Client as DataClient, types::request::PositionsRequest as DataPositionsRequest,
 };
-use polymarket_client_sdk::types::{Address, B256, U256};
-use polymarket_client_sdk::ws::connection::ConnectionState;
+use polymarket_client_sdk_v2::types::{Address, B256, U256};
+use polymarket_client_sdk_v2::ws::connection::ConnectionState;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::task::AbortHandle;
@@ -84,7 +84,7 @@ impl UserState {
 
     pub fn apply_order_message(
         &mut self,
-        msg: &polymarket_client_sdk::clob::ws::OrderMessage,
+        msg: &polymarket_client_sdk_v2::clob::ws::OrderMessage,
     ) -> Result<()> {
         self.open_orders.apply_order_message(msg)?;
         // `OrderMessage` 不更新仓位；它只维护活跃挂单和订单上下文，供 maker
@@ -103,7 +103,7 @@ impl UserState {
 
     pub fn apply_trade_message(
         &mut self,
-        msg: &polymarket_client_sdk::clob::ws::TradeMessage,
+        msg: &polymarket_client_sdk_v2::clob::ws::TradeMessage,
     ) -> Result<Option<Fill>> {
         let fill = fill_from_trade_message(msg, self.owner, &self.order_contexts)?;
 
@@ -126,7 +126,7 @@ impl UserState {
 
     fn apply_open_order(
         &mut self,
-        order: &polymarket_client_sdk::clob::types::response::OpenOrderResponse,
+        order: &polymarket_client_sdk_v2::clob::types::response::OpenOrderResponse,
     ) -> Result<()> {
         self.open_orders.apply_open_order(order)?;
         self.order_contexts.insert(
@@ -158,7 +158,7 @@ impl UserState {
 }
 
 fn fill_from_trade_message(
-    msg: &polymarket_client_sdk::clob::ws::TradeMessage,
+    msg: &polymarket_client_sdk_v2::clob::ws::TradeMessage,
     owner: ApiKey,
     order_contexts: &HashMap<String, OrderContext>,
 ) -> Result<Option<Fill>> {
@@ -553,7 +553,7 @@ async fn rebootstrap_state(
 
 async fn apply_order(
     state: &Arc<RwLock<UserState>>,
-    order: &polymarket_client_sdk::clob::ws::OrderMessage,
+    order: &polymarket_client_sdk_v2::clob::ws::OrderMessage,
     store: Option<&sqlite::Store>,
     sink: Option<&dyn EventSink>,
 ) -> Result<()> {
@@ -579,7 +579,7 @@ async fn apply_order(
 
 async fn apply_trade(
     state: &Arc<RwLock<UserState>>,
-    trade: &polymarket_client_sdk::clob::ws::TradeMessage,
+    trade: &polymarket_client_sdk_v2::clob::ws::TradeMessage,
     store: Option<&sqlite::Store>,
     sink: Option<&dyn EventSink>,
 ) -> Result<()> {
@@ -614,15 +614,15 @@ async fn apply_trade(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polymarket_client_sdk::auth::ApiKey;
-    use polymarket_client_sdk::clob::{
+    use polymarket_client_sdk_v2::auth::ApiKey;
+    use polymarket_client_sdk_v2::clob::{
         types::{OrderStatusType, Side, TraderSide},
         ws::{
             OrderMessage, TradeMessage,
             types::response::{MakerOrder, TradeMessageStatus},
         },
     };
-    use polymarket_client_sdk::types::{B256, U256, b256};
+    use polymarket_client_sdk_v2::types::{B256, U256, b256};
     use rust_decimal::Decimal;
 
     fn market() -> B256 {
@@ -647,7 +647,7 @@ mod tests {
             .original_size(Decimal::new(5, 0))
             .size_matched(Decimal::ZERO)
             .status(OrderStatusType::Live)
-            .msg_type(polymarket_client_sdk::clob::ws::types::response::OrderMessageType::Placement)
+            .msg_type(polymarket_client_sdk_v2::clob::ws::types::response::OrderMessageType::Placement)
             .owner(ApiKey::nil())
             .outcome("Up".to_string())
             .build()
@@ -785,7 +785,7 @@ mod tests {
             .id("trade-3".to_string())
             .market(market())
             .asset_id(asset())
-            .side(polymarket_client_sdk::clob::types::Side::Buy)
+            .side(polymarket_client_sdk_v2::clob::types::Side::Buy)
             .size(Decimal::new(5, 0))
             .fee_rate_bps(Decimal::new(25, 0))
             .price(Decimal::new(36, 2))

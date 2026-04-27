@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use polymarket_client_sdk::clob::types::OrderType;
+use polymarket_client_sdk_v2::clob::types::OrderType;
 use rust_decimal::Decimal;
 
 use crate::strategy::crypto_reversal::model;

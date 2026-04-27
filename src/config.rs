@@ -9,7 +9,7 @@ use crate::errors::{PolyfillError, Result};
 use crate::types::crypto::{Interval, Symbol};
 
 const DEFAULT_ENV_PATH: &str = ".env";
-const DEFAULT_CLOB_HOST: &str = "https://clob.polymarket.com";
+const DEFAULT_CLOB_HOST: &str = "https://clob-v2.polymarket.com";
 const DEFAULT_SQLITE_PATH: &str = "data/runtime/events.sqlite3";
 
 const PRIVATE_KEY_ENV: &str = "PRIVATE_KEY";

@@ -69,7 +69,7 @@ flowchart TD
 
 默认值：
 
-- `CLOB_HOST=https://clob.polymarket.com`
+- `CLOB_HOST=https://clob-v2.polymarket.com`
 - `SYMBOLS=btc`
 - `INTERVALS=5m`
 - `SQLITE_PATH=data/runtime/events.sqlite3`

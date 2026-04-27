@@ -18,7 +18,7 @@
 //! - taker 卖单手续费直接以 USDC 扣除。
 
 use crate::errors::{PolyfillError, Result};
-use polymarket_client_sdk::{
+use polymarket_client_sdk_v2::{
     clob::{
         types::response::TradeResponse,
         types::{Side, TradeStatusType, TraderSide},

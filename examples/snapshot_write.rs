@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
-use polymarket_client_sdk::gamma::Client as GammaClient;
+use polymarket_client_sdk_v2::gamma::Client as GammaClient;
 use polymarket_ltf::binance::Client as BinanceClient;
 use polymarket_ltf::polymarket::market_registry::{
     MarketRegistry, refresh_registry, spawn_auto_refresh, spawn_subscription_scheduler,

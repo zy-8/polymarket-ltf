@@ -1,6 +1,6 @@
 use anyhow::Result;
-use polymarket_client_sdk::gamma::Client;
-use polymarket_client_sdk::gamma::types::request::MarketBySlugRequest;
+use polymarket_client_sdk_v2::gamma::Client;
+use polymarket_client_sdk_v2::gamma::types::request::MarketBySlugRequest;
 use polymarket_ltf::polymarket::market_registry::{
     active_markets, current_active_market, next_active_market,
 };

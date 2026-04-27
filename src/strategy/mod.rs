@@ -7,13 +7,13 @@
 use alloy_signer::Signer as _;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
-use polymarket_client_sdk::auth::{Credentials, Normal, state::Authenticated};
-use polymarket_client_sdk::clob::types::SignatureType;
-use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::data::Client as DataClient;
-use polymarket_client_sdk::gamma::Client as GammaClient;
-use polymarket_client_sdk::types::Address;
-use polymarket_client_sdk::{POLYGON, derive_safe_wallet};
+use polymarket_client_sdk_v2::auth::{Credentials, Normal, state::Authenticated};
+use polymarket_client_sdk_v2::clob::types::SignatureType;
+use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk_v2::data::Client as DataClient;
+use polymarket_client_sdk_v2::gamma::Client as GammaClient;
+use polymarket_client_sdk_v2::types::Address;
+use polymarket_client_sdk_v2::{POLYGON, derive_safe_wallet};
 
 use crate::config::AppConfig;
 use crate::dashboard::Handle as DashboardHandle;

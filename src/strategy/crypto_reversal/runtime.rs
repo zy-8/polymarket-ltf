@@ -6,9 +6,9 @@ use std::time::Duration;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use polymarket_client_sdk::auth::{Normal, state::Authenticated};
-use polymarket_client_sdk::clob::Client as ClobClient;
-use polymarket_client_sdk::types::B256;
+use polymarket_client_sdk_v2::auth::{Normal, state::Authenticated};
+use polymarket_client_sdk_v2::clob::Client as ClobClient;
+use polymarket_client_sdk_v2::types::B256;
 use tokio::task::JoinSet;
 use tracing::info;
 

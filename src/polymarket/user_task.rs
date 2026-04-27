@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use polymarket_client_sdk::data::types::request::PositionsRequest;
-use polymarket_client_sdk::gamma::types::request::MarketBySlugRequest;
-use polymarket_client_sdk::gamma::types::response::Market;
+use polymarket_client_sdk_v2::data::types::request::PositionsRequest;
+use polymarket_client_sdk_v2::gamma::types::request::MarketBySlugRequest;
+use polymarket_client_sdk_v2::gamma::types::response::Market;
 use rust_decimal::Decimal;
 use tokio::task::AbortHandle;
 use tracing::{info, warn};
@@ -171,7 +171,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::settled_outcome_from_market;
-    use polymarket_client_sdk::gamma::types::response::Market;
+    use polymarket_client_sdk_v2::gamma::types::response::Market;
     use rust_decimal::Decimal;
 
     fn market(outcomes: Vec<&str>, prices: Vec<Decimal>, closed: bool) -> Market {
